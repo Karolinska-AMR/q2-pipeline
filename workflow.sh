@@ -99,7 +99,7 @@ Metadata column for PERMANOVA: $GROUP_COL
 ===============================================
 EOF
 
-if false; then
+# if false; then ## IGNORE - jump to R analysis, for testing purposes
 # ------------------------------
 # Utility wrappers
 # ------------------------------
@@ -331,7 +331,8 @@ info "Output artifacts are in: $OUTPUT_DIR"
 info "Statistical test results are in: $OUTPUT_DIR/statistical_tests"
 info "To view .qzv files, use 'qiime tools view file.qzv'"
 
-fi ## End of 'if false' block
+#fi ## End of 'if false' block
+
 # ------------------------------
 # Downstream analysis with R
 # ------------------------------
