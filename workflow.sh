@@ -337,6 +337,7 @@ info "To view .qzv files, use 'qiime tools view file.qzv'"
 # Downstream analysis with R
 # ------------------------------
 
+
 # 18. Run R downstream analysis script
 step 18 "Running R downstream analysis: ancombc.R"
 Rscript "$SCRIPT_DIR/ancombc.R" "$OUTPUT_DIR" "$METADATA"
