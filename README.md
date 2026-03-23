@@ -31,7 +31,7 @@ This pipeline performs:
 3. **Phylogenetic Analysis**: Construct phylogenetic trees using MAFFT and FastTree
 4. **Diversity Analysis**: Calculate alpha and beta diversity metrics
 5. **Taxonomic Classification**: Assign taxonomy using pre-trained classifiers
-6. **Statistical Testing**: PERMANOVA, alpha diversity tests, and ANCOM-BC differential abundance analysis
+6. **Statistical Testing**: PERMANOVA, alpha diversity tests, and LinDA differential abundance analysis
 7. **Visualization**: Generate publication-ready plots in R
 
 ---
@@ -101,14 +101,10 @@ install.packages(c("pals"))
 if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 
-BiocManager::install(c(
-  "qiime2R",
-  "ANCOMBC"
-))
+BiocManager::install(c("qiime2R"))
 
 # Verify installations
 library(qiime2R)
-library(ANCOMBC)
 library(ggplot2)
 library(dplyr)
 ```
@@ -121,6 +117,7 @@ install.packages("devtools")
 
 # Install qiime2R from GitHub
 devtools::install_github("jbisanz/qiime2R")
+devtools::install_github("zhouhj1994/LinDA")
 ```
 
 ---
@@ -130,8 +127,14 @@ devtools::install_github("jbisanz/qiime2R")
 ```
 q2-pipeline/
 ├── workflow.sh              # Main QIIME2 analysis script
-├── plot_manager.R           # Alpha/beta diversity visualization
-├── ancombc.R               # Differential abundance analysis
+├── R/
+├── adonis_pairwise.Rmd      # Pairwise PERMANOVA analysis (beta-diversity) with subject-level stratification
+├── alpha_div_test.Rmd       # Alpha diversity analysis using mixed-effects models (richness and evenness)
+├── linDA.Rmd                # Differential abundance analysis across taxonomic levels using LinDA
+├── phenotypic_analysis.Rmd  # Analysis of quantitative culture data (logCFU) using mixed-effects models
+├── phylo_tree.Rmd           # Construction and annotation of ASVs phylogenetic tree to be visualized in iTOL
+├── plot_taxa_diff.Rmd       # Visualization of selected taxa (CLR abundance, boxplots, longitudinal trends)
+└── utility.Rmd              # Helper functions for data processing, transformation, and plotting
 ├── README.md               # This file
 └── classifier/            # Taxonomic classifier directory
    └── classifier.qza     # Pre-trained classifier
@@ -198,79 +201,6 @@ bash workflow.sh \
 bash workflow.sh -h
 ```
 
-### 2. Visualization and Statistics (R)
-
-Statistics and visualization are executed automatically as part of the QIIME2 workflow. However, they can be run independently on previously generated outputs for re-analysis or customization.
-
-#### Option A: Automatic Execution (Recommended)
-
-The R scripts are called automatically by `workflow.sh` after QIIME2 analysis completes. No additional action is required.
-
-#### Option B: Manual Execution on Existing Results
-
-To run R scripts independently on previous QIIME2 outputs:
-
-**Prerequisites:**
-- QIIME2 workflow must have completed successfully
-- Output directory must follow the expected folder structure (see [Folder Structure](#folder-structure))
-
-**Required Variables:**
-
-Before running the R scripts manually, you need to configure the following variables at the top of each script:
-
-```r
-# Required paths - modify these variables
-results_dir <- "./output"              # Path to workflow output directory
-metadata_tsv <- "./output/artifacts/metadata.tsv"  # Path to metadata file
-```
-
-**Setup and Execution:**
-
-```bash
-# Navigate to your results directory
-cd /path/to/your/output
-
-# Ensure metadata is accessible
-# If not already in artifacts/, copy it there:
-cp /path/to/metadata.tsv ./artifacts/metadata.tsv
-
-# Copy or link R scripts to results directory (optional but recommended)
-cp /path/to/plot_manager.R .
-cp /path/to/ancombc.R .
-```
-
-**Run plot_manager.R:**
-
-```r
-# In R or RStudio
-# Set working directory to QIIME2 output folder
-setwd("/path/to/output")
-
-# Edit variables at top of script if needed:
-# results_dir <- "./output"
-# metadata_tsv <- "./output/artifacts/metadata.tsv"
-
-# Source the script
-source("plot_manager.R")
-
-# This will automatically:
-# 1. Perform alpha diversity analysis (Faith's PD, Evenness)
-# 2. Perform beta diversity analysis (PERMANOVA & MRPP)
-# 3. Create PCoA visualization with marginal boxplots
-# 4. Analyze read statistics with heatmap and boxplots
-# 5. Save all plots to ./R_export/
-```
-
-**Important Notes:**
-- The R scripts assume the folder structure created by `workflow.sh`
-- All QIIME2 artifacts must be in their expected locations (see [Output Structure](#output-structure))
-- The `./R_export/` directory will be created automatically if it doesn't exist
-- Existing output files will be overwritten
-
-**Outputs:**
-- `R_export/alpha_diversity.pdf` - Alpha diversity boxplots with Tukey HSD significance tests
-- `R_export/pcoa.pdf` - PCoA plot with marginal boxplots for PC1 and PC2
-- `R_export/read_stats_boxplot-heatmap.pdf` - Read count statistics
 
 ### Output Structure (after running workflow.sh):
 
@@ -345,7 +275,7 @@ View these files at [https://view.qiime2.org/](https://view.qiime2.org/)
 
 - **QIIME2 Documentation**: [https://docs.qiime2.org/](https://docs.qiime2.org/)
 - **QIIME2 Forum**: [https://forum.qiime2.org/](https://forum.qiime2.org/)
-- **ANCOM-BC**: [https://bioconductor.org/packages/ANCOMBC/](https://bioconductor.org/packages/ANCOMBC/)
+- **LinDA**: [https://github.com/zhouhj1994/LinDA](https://github.com/zhouhj1994/LinDA)
 
 ---
 
@@ -359,8 +289,8 @@ If you use this pipeline, please cite:
 **Deblur:**
 - Amir A, et al. (2017) Deblur rapidly resolves single-nucleotide community sequence patterns. *mSystems* 2: e00191-16. doi: 10.1128/mSystems.00191-16
 
-**ANCOM-BC:**
-- Lin H, Peddada SD. (2020) Analysis of compositions of microbiomes with bias correction. *Nature Communications* 11: 3514. doi: 10.1038/s41467-020-17041-7
+**LinDA**
+- Zhou H., et al. (2022) LinDA: linear models for differential abundance analysis of microbiome compositional data. Genome Biol 23, 95 . doi.org/10.1186/s13059-022-02655-5
 
 **Visualization Packages:**
 - Wickham H. (2016) ggplot2: Elegant Graphics for Data Analysis. Springer-Verlag New York.
