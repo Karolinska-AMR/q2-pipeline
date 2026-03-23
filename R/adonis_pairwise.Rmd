@@ -1,0 +1,103 @@
+---
+title: "adonis"
+date: "2026-01-10"
+output: html_document
+---
+
+```{r}
+rm(list = ls())
+library(vegan)
+
+# Define the pairwise.adonis2 function with strata support
+pairwise.adonis2 <- function(dist_obj, factors, strata = NULL, p.adjust.m = "bonferroni", permutations = 9999) {
+
+    if (!inherits(dist_obj, "dist")) {
+    stop("dist_obj must be a 'dist' object.")
+  }
+  
+  unique_factors <- unique(as.character(factors))
+  co <- combn(unique_factors, 2)
+  
+  pairs <- c()
+  F.Model <- c()
+  R2 <- c()
+  p.value <- c()
+  
+  # Loop over each pair
+  for (elem in 1:ncol(co)) {
+    sub_idx <- factors %in% c(co[1, elem], co[2, elem])
+    
+    sub_dist <- as.matrix(dist_obj)[sub_idx, sub_idx]  
+    sub_dist <- as.dist(sub_dist)  # Back to dist
+    sub_factors <- droplevels(as.factor(factors[sub_idx]))
+    sub_strata <- if (!is.null(strata)) strata[sub_idx] else NULL
+    
+    # Run adonis2 for the pair
+    ad <- adonis2(sub_dist ~ sub_factors, strata = sub_strata, permutations = permutations)
+    
+    # Collect results
+    pairs <- c(pairs, paste(co[1, elem], "vs", co[2, elem], sep = " "))
+    F.Model <- c(F.Model, ad$F[1])
+    R2 <- c(R2, ad$R2[1])
+    p.value <- c(p.value, ad$`Pr(>F)`[1])
+  }
+  
+  # Adjust p-values
+  p.adjusted <- p.adjust(p.value, method = p.adjust.m)
+  
+  # Add significance codes
+  sig <- rep("", length(p.adjusted))
+  sig[p.adjusted <= 0.05] <- "."
+  sig[p.adjusted <= 0.01] <- "*"
+  sig[p.adjusted <= 0.001] <- "**"
+  sig[p.adjusted <= 0.0001] <- "***"
+  
+  # Create results data frame
+  res <- data.frame(
+    pairs = pairs,
+    F.Model = F.Model,
+    R2 = R2,
+    p.value = p.value,
+    p.adjusted = p.adjusted,
+    sig = sig
+  )
+  
+  # Print significance codes legend
+  cat("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1\n")
+  
+  return(res)
+}
+
+```
+
+```{r}
+
+library(qiime2R)
+
+
+metadata<-read_q2metadata("../artifacts//metadata.tsv")
+dist_obj <-read_qza("../artifacts/diversities/weighted_unifrac_distance_matrix.qza")
+dist_mat<- as.dist(dist_obj$data)
+
+sample_names <- attr(dist_mat, "Labels")
+meta_ordered <- metadata[match(sample_names, metadata$SampleID), ]
+stopifnot(all(meta_ordered$sampleid == sample_names))
+
+results <- pairwise.adonis2(
+  dist_obj = dist_mat,
+  factors = meta_ordered$visit,
+  strata = meta_ordered$`subject-id`,
+  p.adjust.m = "fdr",  
+  permutations = 9999
+)
+
+write.csv(
+  as.data.frame(results),
+  file = "../export/weighted_unifrac_pairwise_adonis.csv",
+  row.names = FALSE
+)
+
+```
+
+
+

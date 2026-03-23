@@ -1,0 +1,246 @@
+---
+title: "alpha_div_test"
+date: "2026-01-15"
+output: html_document
+---
+
+```{r}
+
+rm(list = ls())
+library(dplyr)
+library(qiime2R)
+library(ggdist)
+library(ggplot2)
+library(ggtext)
+library(tidyr)
+
+metadata<-read_q2metadata("../artifacts/metadata.tsv")
+
+richness <-read_qza("../artifacts/diversities/faith_pd_vector.qza")$data
+evenness <-read_qza("../artifacts/diversities/evenness_vector.qza")$data
+
+richness <- richness %>% tibble::rownames_to_column("SampleID") %>%
+  merge(metadata[c("SampleID","subject-id","visit")], by='SampleID') %>%
+  mutate(visit = factor(visit, levels = c("v2", "v6", "v7", "v8")),
+         subject_id=`subject-id`)
+
+evenness <- evenness %>% tibble::rownames_to_column("SampleID") %>%
+  merge(metadata[c("SampleID","subject-id","visit")], by='SampleID') %>%
+  mutate(visit = factor(visit, levels = c("v2", "v6", "v7", "v8")),
+         subject_id=`subject-id`)
+
+```
+
+```{r}
+
+library(lme4)
+library(lmerTest)
+library(emmeans)
+
+m_pd <- lmer(faith_pd ~ visit + (1 | subject_id), data = richness)
+anova_df <- anova(m_pd) %>% as.data.frame()
+pairwise_res<-emmeans(m_pd, pairwise ~ visit, adjust = "fdr")
+pairwise_richness <- as.data.frame(pairwise_res$contrasts)
+
+
+write.csv(
+  anova_df,
+  file = "../export/faith_pd_lmm_anova.csv",
+  row.names = TRUE
+)
+
+write.csv(
+  pairwise_richness,
+  file = "../export/faith_pd_lmm_pairwise_emmeans.csv",
+  row.names = FALSE
+)
+
+
+m_ev <- lmer(pielou_evenness ~ visit + (1 | subject_id), data = evenness)
+anova_df <- anova(m_ev) %>% as.data.frame()
+pairwise_res<-emmeans(m_ev, pairwise ~ visit, adjust = "fdr")
+pairwise_evenness <- as.data.frame(pairwise_res$contrasts)
+
+write.csv(
+  anova_df,
+  file = "../export/pielou_evenness_lmm_anova.csv",
+  row.names = TRUE
+)
+
+write.csv(
+  pairwise_evenness,
+  file = "../export/pielou_evenness_lmm_pairwise_emmeans.csv",
+  row.names = FALSE
+)
+
+```
+
+```{r}
+
+library(ggplot2)
+library(ggsignif)
+library(ggside)
+get_stat <- function(pairwise_df,max_val){
+  
+  y_step <- 0.05 * max_val
+  stat <- pairwise_df %>%
+      mutate(
+        split_groups = strsplit(contrast, " - "),
+        start = sapply(split_groups, `[`, 1),
+        end = sapply(split_groups, `[`, 2),
+        
+      ) %>% 
+       filter(start %in% c('v2','v6') & p.value<0.05) %>% 
+      mutate(
+        y = max_val + (row_number() * y_step),
+        time_point = start,
+        label = ifelse(p.value < 0.0001, 
+                       "p<0.0001", 
+                       paste0("p=", sprintf("%.4f", signif(p.value,3)))))
+}
+
+plot_boxplot <- function(data,stat,ytitle,hide_x_axis){
+  labels = c("v2"="Baseline 1", "v6"="Baseline 2", "v7"="1-week glasmacinal", "v8"="2-week glasmacinal")
+
+p <- ggplot(data, aes(x = visit, y = value)) +
+  geom_jitter(width = 0.1,height = 0,aes(fill = visit),color="#393E46",shape=21,size=2,alpha=0.7) +
+  geom_boxplot(aes(fill = visit),alpha = 0.6,width = 0.5,linewidth = 0.2,color="#393E46",outliers=F) +
+  geom_signif(
+      data = stat,
+      aes(xmin = start, xmax = end, annotations = label, y_position = y),
+      size = .2,
+      textsize = 2.5,
+      vjust = -0.2,
+      margin_top = 10,
+      manual = TRUE
+    
+    )+
+  scale_fill_manual(name="",values=c("#5CB338", "#FFB200","#A19AD3", "#A31D1D"))+
+  scale_color_manual(name="",values=c("#5CB338", "#FFB200","#A19AD3", "#A31D1D"))+
+  scale_x_discrete(labels=labels) +
+  labs(y=ytitle,x="Time Point")+
+  theme_bw()+
+    theme(plot.title = element_text(hjust = 0.5,size=10,face = 'bold.italic'),
+          plot.subtitle = element_text(hjust = 0.5,size=8),
+              legend.position="none",
+              axis.text.x=element_text(size=8,hjust=1,vjust = 0.5,angle=90),
+              axis.text.y=element_text(size=8),
+              axis.title.y = element_text(size=9),
+              axis.title.x = element_text(size=9),
+              panel.grid.major.x = element_line(linewidth =0.3,linetype = "solid"),
+              panel.grid.major.y = element_line(linewidth =0.2,linetype = "dashed", colour = "gray80"),
+              panel.grid.minor.y = element_line(linewidth =0.2,linetype = "dotted", colour = "gray80"))
+
+   if(hide_x_axis){
+      p <- p + labs(x="") +
+        theme(axis.title.x = element_blank(),
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank())
+   }
+  return(p)
+}
+
+plot_beta_diversity <- function(){
+  library(qiime2R)
+  library(ggplot2)
+  library(dplyr)
+  library(tidyverse)
+  library(ggrepel)
+  library(ggforce)
+  library(ggtext)
+  library(ggside)
+  
+  metadata<-read_q2metadata("../artifacts/metadata.tsv")
+  
+
+  
+  pcoaResults<-read_qza("../artifacts/diversities/weighted_unifrac_pcoa_results.qza")
+  
+  pca_tbl<- pcoaResults$data$Vectors
+  
+  pc_variances <- pca_tbl %>%  summarize(across(everything(), var))
+  total_variance <- sum(pc_variances,na.rm = T)
+  proportion_variance <- round(100.0 * pc_variances / total_variance,2)  
+  
+  pca_tbl<-merge(x=pca_tbl %>% select('SampleID','PC1','PC2'),y=metadata,by='SampleID')
+  
+  pca_tbl$ovisit <- pca_tbl$visit
+  pca_tbl <- pca_tbl %>%
+    mutate(visit = case_when(
+      ovisit == "v2" ~ "Baseline 1",
+      ovisit == "v6" ~ "Baseline 2",
+      ovisit == "v7" ~ "1-week glasmacinal",
+      ovisit == "v8" ~ "2-week glasmacinal",
+      TRUE ~ ovisit 
+    )) %>% mutate(visit=factor(visit,levels=c("Baseline 1", "Baseline 2",
+                                              "1-week glasmacinal", "2-week glasmacinal")))
+
+ 
+   print(str(pca_tbl[, c("visit", "PC1", "PC2")]))
+ 
+   p<- ggplot(data=pca_tbl,aes(shape=visit,x=PC2, y=PC1)) +
+          geom_point(aes(fill=visit),size=3,alpha=.7,stroke=0.5,color='black')+
+          scale_shape_manual(name="",values=c(21,24,22,23)) +
+          scale_fill_manual(name="",values =c("#5CB338", "#FFB200","#A19AD3", "#A31D1D") )+
+          labs(y=paste0("PCoA1 [",proportion_variance$PC1,"%]"),x=paste0("PCoA2 [",proportion_variance$PC2,"%]"))+
+          theme_bw()+
+          theme(text=element_text(size=10),
+                axis.title=element_text(size=10),
+                legend.text=element_text(size=9),
+                legend.title = element_text(size=10),
+                legend.position="bottom", legend.box="horizontal",
+                axis.title.x = element_text(size = 9, margin = margin(t = -40, unit = "pt")),
+                axis.title.y = element_text(size = 9, margin = margin(r = 0, unit = "pt"))
+                ) +
+    # Y-side: Boxplots of PC1 ~ visit (vertical orientation, shared y-axis)
+    geom_ysideboxplot(aes(x = visit, y = PC1, fill = visit),  orientation = "x",# Local aes: use PC1 on shared y
+                      inherit.aes = FALSE, varwidth = TRUE, alpha = 0.7,linewidth = 0.2, show.legend = FALSE) +
+       theme(ggside.axis.text.y = element_blank(),
+          ggside.axis.ticks.y =  element_blank())+
+
+
+
+# X-side: Boxplots of PC2 ~ visit (horizontal orientation, shared x-axis)
+geom_xsideboxplot(aes(y = visit, x = PC2, fill = visit), orientation = "y", # Local aes: use PC2 on shared x
+                  inherit.aes = FALSE, varwidth = TRUE, alpha = 0.7,linewidth = 0.2, show.legend = FALSE) +
+#theme(ggside.axis.text.x = element_text(size = 10, angle = -90, hjust = 0, vjust = 0)) +
+theme(ggside.axis.text.x = element_blank(),
+      ggside.axis.ticks.x= element_blank())+
+    guides(shape = guide_legend(ncol = 4)) + 
+theme(legend.position = "bottom",
+      legend.justification = "center",
+      legend.margin = margin(0, 0, 0, 0),  
+      legend.box.margin = margin(-40, 0, 0, 0),  
+      legend.direction = "horizontal") 
+  
+  return(p)
+}
+
+
+```
+
+
+
+```{r}
+library(patchwork)
+
+stat_richness <-  get_stat(pairwise_richness,max(richness$faith_pd))
+richness$value <- richness$faith_pd
+p_richness <- plot_boxplot(richness,stat_richness,"Richness (Faith's PD)",T)
+
+
+stat_eveness <-  get_stat(pairwise_evenness,max(evenness$pielou_evenness))
+evenness$value <- evenness$pielou_evenness
+p_eveness <- plot_boxplot(evenness,stat_eveness,"Evenness (Pielou’s Index)",F)
+
+
+p_beta<- plot_beta_diversity()
+
+p_combine <-(p_richness / p_eveness) | p_beta
+p_combine + plot_annotation(tag_levels = 'A') + plot_layout(width = c(0.7,1.3))
+ggsave("../export/diversity.pdf", width = 9, height = 7,device = "pdf")
+
+```
+
+
+

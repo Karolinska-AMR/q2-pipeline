@@ -1,0 +1,395 @@
+---
+title: "phylogenetic tree"
+date: "2026-01-19"
+output: html_document
+---
+
+```{r}
+
+rm(list = ls())
+library(qiime2R)
+library(tidyverse)
+library(ape)
+
+feature_table <-read_qza("../artifacts/table.qza")$data
+taxonomy_annot <- read_qza('../artifacts/taxonomy_classification/taxonomy.qza')$data
+taxonomy_annot <-taxonomy_annot %>% mutate(taxa = str_remove_all(Taxon, "D_\\d__")) %>%
+  separate_wider_delim(taxa, "; ", names = c("Kingdom", "Phylum", "Class", "Order", 
+                                             "Family", "Genus", "Species"), too_few = "align_start") %>%
+   mutate_at(c("Kingdom", "Phylum", "Class", 
+               "Order", "Family", "Genus", "Species"), list(~ substr(., 4, nchar(.))))
+
+library(dplyr)
+
+# Step 1: Select only the v2 and v6 columns
+BL_ft <- feature_table %>%
+  as.data.frame() %>%
+  select(ends_with(c("v2", "v6")))   # cleaner syntax
+
+TR_ft <- feature_table %>%
+  as.data.frame() %>%
+  select(ends_with(c("v7", "v8"))) 
+
+# Step 2: Calculate prevalence = fraction of samples where each feature is present (≥1)
+prevalence_BL <- rowMeans(BL_ft >= 1, na.rm = TRUE)   
+prevalence_TR <- rowMeans(TR_ft >= 1, na.rm = TRUE)  
+
+# If you also want to merge prevalence with taxonomy annotation
+# (e.g. to get the prevalence of each feature along with its taxonomy)
+prevalence_df <- data.frame(
+  Feature.ID = names(prevalence_BL),
+  prevalence_BL = prevalence_BL,
+  prevalence_TR = prevalence_TR
+) %>%
+  filter(prevalence_BL >= 0.30 | prevalence_TR>= 0.30) %>%
+  left_join(taxonomy_annot, by = "Feature.ID")   # much cleaner than merge()
+
+keep_cols <- prevalence_df$Feature.ID
+
+```
+
+```{r}
+library(ggtree)
+library(ggplot2)
+library(randomcoloR)
+
+tree <- read.tree("../../phylogentic_tree/exported-tree/tree.nwk")
+
+tree <- keep.tip(tree, keep_cols)
+write.tree(tree,"../../phylogentic_tree/exported-tree/tree_f30.nwk")
+
+asv_meta <- taxonomy_annot %>% filter(Feature.ID %in% keep_cols)
+
+write_csv(asv_meta,"../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
+
+
+```
+differentially abundant taxa after treatment v7 or v8
+```{r}
+
+asv_meta <- read.csv("../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
+DA_asvs <- read.csv("../export/linDA_ASVs_Sig_LFC1.csv")
+colorstrip_data <- DA_asvs %>%
+  mutate(
+    label = taxa,
+    color = "#A8DF8E"
+  ) %>% 
+  select(label, color) %>% distinct()
+
+data_lines <- colorstrip_data %>%
+  mutate(label = as.character(label)) %>%
+  mutate(line = paste(label, color, sep = ",")) %>%
+  pull(line)
+
+header <- c(
+  "DATASET_COLORSTRIP",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Diff. Abundant ASVs",
+  "COLOR,#F5F0CD",
+  "COLOR_BRANCHES,0",
+  "STRIP_WIDTH,30",
+  "STRIP_LABEL_AUTO_COLOR,0",
+  "STRIP_LABEL_POSITION,center",
+  "STRIP_LABEL_ROTATION,90",
+  "SHOW_STRIP_LABELS,0",
+  "MARGIN,2",
+  "LEGEND_TITLE,Diff_ASV",
+  "#LEGEND_SCALE 1",
+  "#LEGEND_POSITION_X 100",
+  "#LEGEND_POSITION_Y 100",
+  "#LEGEND_HORIZONTAL 0",
+  "LEGEND_SHAPES,1,1",
+  "LEGEND_COLORS,#8F0177,#F63049,#33A1E0,#093FB4,#FFFDF6",
+  "LEGEND_LABELS,LFC<=-2,LFC<=-1,LFC<2,LFC>=2,No Change",
+  "#LEGEND_SHAPE_SCALES 1,1,1,1,1",
+  "SHOW_LABELS,0",
+  "BORDER_WIDTH,1",
+  "BORDER_COLOR,#FFFFFF",
+  "COMPLETE_BORDER,1",
+  "DATA"
+)
+full_content <- c(header, data_lines)
+writeLines(full_content,"../../phylogentic_tree/exported-tree/itol/itol_colorstrip_diff_ASVs_all.txt")
+```
+
+differentially abundant taxa for each visit
+```{r}
+sel_visit<-"v8"
+asv_meta <- read.csv("../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
+DA_asvs <- read.csv("../export/linDA_ASVs_Sig_LFC1.csv")
+colorstrip_data <- DA_asvs %>% merge(asv_meta %>% select(Feature.ID),by.x = "taxa",by.y = "Feature.ID",all=T) %>%
+  filter(visit == !!sel_visit) %>%
+  mutate(
+    label = taxa,
+    color = case_when(
+      log2FoldChange <= -2   ~ "#8F0177",   # strong decrease – dark purple
+      log2FoldChange <= -1   ~ "#F63049",   # moderate decrease – red/pink
+      log2FoldChange < 2     ~ "#33A1E0",   # weak / no strong change – light blue
+      log2FoldChange >= 2    ~ "#093FB4",    # strong increase ≥ +2 – dark blue
+      TRUE                   ~ "#FFFFFF"
+    )
+  ) %>% 
+  select(label, color, log2FoldChange)
+
+data_lines <- colorstrip_data %>%
+  mutate(label = as.character(label)) %>%
+  mutate(line = paste(label, color, sep = ",")) %>%
+  pull(line)
+
+header <- c(
+  "DATASET_COLORSTRIP",
+  "SEPARATOR COMMA",
+  paste0("DATASET_LABEL,Diff ASVs", sel_visit),
+  "COLOR,#F5F0CD",
+  "COLOR_BRANCHES,0",
+  "STRIP_WIDTH,30",
+  "STRIP_LABEL_AUTO_COLOR,0",
+  "STRIP_LABEL_POSITION,center",
+  "STRIP_LABEL_ROTATION,90",
+  "SHOW_STRIP_LABELS,0",
+  "MARGIN,2",
+  "LEGEND_TITLE,Diff_ASV",
+  "#LEGEND_SCALE 1",
+  "#LEGEND_POSITION_X 100",
+  "#LEGEND_POSITION_Y 100",
+  "#LEGEND_HORIZONTAL 0",
+  "LEGEND_SHAPES,1,1",
+  "LEGEND_COLORS,#8F0177,#F63049,#33A1E0,#093FB4,#FFFDF6",
+  "LEGEND_LABELS,LFC<=-2,LFC<=-1,LFC<2,LFC>=2,No Change",
+  "#LEGEND_SHAPE_SCALES 1,1,1,1,1",
+  "SHOW_LABELS,0",
+  "BORDER_WIDTH,1",
+  "BORDER_COLOR,#FFFFFF",
+  "COMPLETE_BORDER,1",
+  "DATA"
+)
+full_content <- c(header, data_lines)
+writeLines(full_content, paste0("../../phylogentic_tree/exported-tree/itol/itol_colorstrip_diff_ASVs",sel_visit,".txt"))
+```
+
+```{r}
+library(tidyverse)
+library(scales)   # for hue_pal() or other color generators
+
+# Assume your dataframe is called 'metadata'
+# It contains at least: Feature.ID, Genus, Family, Order
+# (Feature.ID should match the leaf names in your iTOL tree)
+
+# ──────────────────────────────────────────────────────────────
+# Function to create one colorstrip dataset for a given rank
+# ──────────────────────────────────────────────────────────────
+create_colorstrip_for_rank <- function(
+    df,
+    rank_column,                # "Genus", "Family", "Order"
+    dataset_label = rank_column,
+    strip_width = 50,
+    label_position = "center",
+    label_rotation = 90,
+    output_file = NULL
+) {
+  
+  # Step 1: Group by the rank, get unique values, assign random colors
+  unique_colors <- df %>%
+    group_by(!!sym(rank_column)) %>%
+    summarize() %>%  # just unique
+    filter(!is.na(!!sym(rank_column))) %>%
+    mutate(
+      color = hue_pal()(n()) %>% sample()  # random distinct colors
+    )
+  
+  # Step 2: Merge back with original DF to assign colors to each Feature.ID
+  colored_df <- df %>%
+    left_join(unique_colors, by = rank_column) %>%
+    filter(!is.na(color))  # drop any NA ranks
+  
+  # Step 3: Prepare data lines: Feature.ID,color,label (where label = rank value)
+  data_lines <- colored_df %>%
+    mutate(
+      label = as.character(!!sym(rank_column)),
+      line = paste(Feature.ID, color, label, sep = ",")
+    ) %>%
+    pull(line)
+  
+  # ── Header (no legend, per-strip labels) ─────────────────────────────────
+  header <- c(
+    "DATASET_COLORSTRIP",
+    "SEPARATOR COMMA",
+    str_glue("DATASET_LABEL,{dataset_label}"),
+    "COLOR,#eeeeee",                    # fallback
+    "COLOR_BRANCHES,0",
+    str_glue("STRIP_WIDTH,{strip_width}"),
+    "STRIP_LABEL_AUTO_COLOR,0",
+    str_glue("STRIP_LABEL_POSITION,{label_position}"),
+    str_glue("STRIP_LABEL_ROTATION,{label_rotation}"),
+    "SHOW_STRIP_LABELS,1",
+    "MARGIN,5",
+    "SHOW_LABELS,1",
+    "BORDER_WIDTH,1",
+    "BORDER_COLOR,#444444",
+    "COMPLETE_BORDER,1",
+    "DATA"
+  )
+  
+  full_content <- c(header, data_lines)
+  
+  if (!is.null(output_file)) {
+    writeLines(full_content, output_file)
+    message("Written: ", output_file, "  (", length(data_lines), " rows)")
+  }
+  
+  invisible(full_content)
+}
+# ──────────────────────────────────────────────────────────────
+# Create three separate files
+# ──────────────────────────────────────────────────────────────
+
+create_colorstrip_for_rank(
+  asv_meta,
+  rank_column   = "Genus",
+  dataset_label = "Genus",
+  output_file   = "../../phylogentic_tree/exported-tree/itol/itol_colorstrip_Genus.txt"
+)
+
+create_colorstrip_for_rank(
+  asv_meta,
+  rank_column   = "Family",
+  dataset_label = "Family",
+  output_file   = "../../phylogentic_tree/exported-tree/itol/itol_colorstrip_Family.txt"
+)
+
+create_colorstrip_for_rank(
+  asv_meta,
+  rank_column   = "Order",
+  dataset_label = "Order",
+  output_file   = "../../phylogentic_tree/exported-tree/itol/itol_colorstrip_Order.txt"
+)
+```
+
+
+```{r}
+abundance_df <- read.csv("../export/clr_normalizations_asvs.csv")
+metadata<-read_q2metadata("../artifacts/metadata.tsv")
+# 1. Prepare long format and join visits
+abundance_long <- abundance_df %>%
+  pivot_longer(cols = -X, names_to = "SampleID", values_to = "value") %>%
+  left_join(metadata %>% select(SampleID, visit), by = "SampleID") %>%
+  filter(visit %in% c("v2", "v6", "v7", "v8"))
+
+median_df <- abundance_long %>%
+  group_by(X, visit) %>%
+  summarise(median_value = median(value, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = visit, values_from = median_value, values_fill = NA)
+
+median_df <- median_df %>%
+  select(X, v2, v6, v7, v8)
+
+data_lines <- median_df %>%
+  mutate(across(-X, ~ format(., scientific = FALSE, digits = 4))) %>%  # clean numbers
+  mutate(line = paste(X, v2, v6, v7, v8, sep = "\t")) %>%
+  pull(line)
+
+# 4. Define iTOL heatmap header (customize as needed)
+header <- c(
+  "DATASET_HEATMAP",
+  "SEPARATOR TAB",
+  "DATASET_LABEL\tMedians per visit",
+  "COLOR\t#ffff00",  # fallback color (yellowish)
+  "COLOR_MIN\t#0571b0",  # low values: blue
+  "COLOR_MAX\t#ca0020",  # high values: red
+  "COLOR_NA\t#cccccc",   # gray for NA
+  "USE_MID_COLOR\t1",    # use mid color for 0 (if values can be negative)
+  "COLOR_MID\t#ffffff",  # white for mid/zero
+  "FIELD_LABELS\tv2\tv6\tv7\tv8",
+  "FIELD_SHAPES\t1\t1\t1\t1",  # rectangles
+  "MARGIN\t5",
+  "SHOW_INTERNAL\t0",
+  "BORDER_WIDTH\t0.5",
+  "BORDER_COLOR\t#000000",
+  "AUTO_LEGEND\t1",  # auto-generate legend based on colors
+  "LEGEND_TITLE\tMedian value",
+  "LEGEND_SHAPES\t1",
+  "LEGEND_COLORS\t#0571b0\t#ffffff\t#ca0020",
+  "LEGEND_LABELS\tLow\tMid\tHigh",
+  "DATA"
+)
+
+# 5. Combine and write to file
+full_content <- c(header, data_lines)
+writeLines(full_content, "../../phylogentic_tree/exported-tree/itol/itol_heatmap_medians_CLR_counts.txt")
+```
+
+```{r}
+library(tidyverse)
+
+sel_visit <- "v7"
+asv_meta <- read.csv("../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
+DA_asvs  <- read.csv("../export/linDA_ASVs_Sig_LFC1.csv")
+
+# Prepare data
+data <- DA_asvs %>% 
+  merge(asv_meta %>% select(Feature.ID), by.x = "taxa", by.y = "Feature.ID", all = TRUE) %>%
+  filter(visit == sel_visit, !is.na(taxa), !is.na(log2FoldChange)) %>%
+  mutate(id = taxa, value = log2FoldChange)
+
+# Positive bars (right, blue shades)
+pos <- data %>% 
+  filter(value > 0) %>%
+  mutate(color = ifelse(value >= 2, "#093FB4", "#33A1E0"))
+
+pos_lines <- pos %>% 
+  mutate(line = paste(id, format(value, digits = 4), sep = ",")) %>% 
+  pull(line)
+
+pos_header <- c(
+  "DATASET_SIMPLEBAR",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Positive log2FC v8",
+  "COLOR,#33A1E0",
+  "BAR_MIN,0",
+  "BAR_MAX,6",
+  "WIDTH,40",
+  "ALIGN,0",
+  "MARGIN,5",
+  "SHOW_VALUES,1",
+  "VALUE_POSITION,inside",
+  "LEGEND_TITLE,Positive",
+  "LEGEND_COLORS,#33A1E0,#093FB4",
+  "LEGEND_LABELS,Weak,Strong",
+  "DATA"
+)
+
+writeLines(c(pos_header, pos_lines), "../../phylogentic_tree/exported-tree/itol/itol_simplebar_positive_v7.txt")
+
+# Negative bars (left, red/purple shades)
+neg <- data %>% 
+  filter(value < 0) %>%
+  mutate(color = ifelse(value <= -2, "#8F0177", "#F63049"))
+
+neg_lines <- neg %>% 
+  mutate(line = paste(id, format(value, digits = 4), sep = ",")) %>% 
+  pull(line)
+
+neg_header <- c(
+  "DATASET_SIMPLEBAR",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Negative log2FC v8",
+  "COLOR,#F63049",
+  "BAR_MIN,-6",
+  "BAR_MAX,0",
+  "WIDTH,40",
+  "ALIGN,0",
+  "MARGIN,5",
+  "SHOW_VALUES,1",
+  "VALUE_POSITION,inside",
+  "LEGEND_TITLE,Negative",
+  "LEGEND_COLORS,#F63049,#8F0177",
+  "LEGEND_LABELS,Weak,Strong",
+  "DATA"
+)
+
+writeLines(c(neg_header, neg_lines), "../../phylogentic_tree/exported-tree/itol/itol_simplebar_negative_v7.txt")
+
+message("Files created: itol_simplebar_positive_v8.txt & itol_simplebar_negative_v8.txt")
+
+```
+

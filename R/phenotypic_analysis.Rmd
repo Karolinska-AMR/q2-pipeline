@@ -1,0 +1,175 @@
+---
+title: "phenotypic_data"
+date: "2026-01-27"
+output: html_document
+---
+
+```{r}
+rm(list = ls())
+library(readxl)
+library(dplyr)
+library(tidyr)
+
+sheet <- "BKV_meropenem"
+df <- read_excel("../phenotypic_data/Phenotypic_Raw data.xlsx", sheet = sheet)
+
+df_long <- df %>%
+  select(subject_id = `Subject ID`, 
+         spp_id = `Spp.ID`, 
+         V2, V6, V7, V8) %>%
+  pivot_longer(
+    cols = c(V2, V6, V7, V8),
+    names_to = "time_point",
+    values_to = "log_cfu"
+  ) %>%
+  mutate(
+    log_cfu = as.numeric(log_cfu)
+  ) %>%
+  select(subject_id, time_point, log_cfu, spp_id) %>%
+  arrange(subject_id, time_point)
+
+write.csv(df_long, paste0("../phenotypic_data/",sheet,".csv"), row.names = FALSE, na = "")
+
+```
+
+```{r}
+
+library(ggtext)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+stat_analysis <- function(data,outdir,name){
+  cfu_data <- cfu_data %>% 
+    mutate(time_point = factor(time_point,levels=c("V2", "V6", "V7", "V8")))
+  
+  m_pd <- lmer( log_cfu ~ time_point + (1 | subject_id), data = cfu_data)
+  anova_df <- anova(m_pd) %>% as.data.frame()
+  pairwise_res<-emmeans(m_pd, pairwise ~ time_point, adjust = "fdr")
+  pairwise_df <- as.data.frame(pairwise_res$contrasts)
+  
+  write_csv(pairwise_df,paste0(outdir,"/",name,"_pairwise_emmeans.csv"))
+  write_csv(anova_df,paste0(outdir,"/",name,"_anova.csv"))
+
+  max_val <- max(cfu_data$log_cfu)
+  y_step <- 0.05 * max_val
+    
+  stat <- pairwise_df %>%
+      mutate(
+        split_groups = strsplit(contrast, " - "),
+        start = sapply(split_groups, `[`, 1),
+        end = sapply(split_groups, `[`, 2),
+        
+      ) %>% 
+       filter(start %in% c('V2','V6') & p.value<0.05) %>% 
+      mutate(
+        y = max_val + (row_number() * y_step),
+        time_point = start,
+        label = ifelse(p.value < 0.0001, 
+                       "p<0.0001", 
+                       paste0("p=", sprintf("%.4f", signif(p.value,3)))))
+  
+  return(stat)
+}
+
+plot_each_sheet <- function(cfu_data,stat,title,subtitle,hide_x_axis,hide_y_title){
+  labels = c("V2"="Baseline 1", "V6"="Baseline 2", "V7"="1-week glasmacinal", "V8"="2-week glasmacinal")
+
+p <- ggplot(cfu_data, aes(x = time_point, y = log_cfu)) +
+  geom_jitter(width = 0.1,height = 0,aes(fill = time_point),color="#393E46",shape=21,size=2,alpha=0.7) +
+  geom_boxplot(aes(fill = time_point),alpha = 0.6,width = 0.5,linewidth = 0.2,color="#393E46",outliers=F) +
+  geom_signif(
+      data = stat,
+      aes(xmin = start, xmax = end, annotations = label, y_position = y),
+      size = .2,
+      textsize = 2.5,
+      vjust = -0.2,
+      margin_top = 10,
+      manual = TRUE
+    
+    )+
+  scale_fill_manual(name="",values=c("#5CB338", "#FFB200","#A19AD3", "#A31D1D"))+
+  scale_color_manual(name="",values=c("#5CB338", "#FFB200","#A19AD3", "#A31D1D"))+
+  scale_x_discrete(labels=labels) +
+  labs(y="LogCFU Count",x="Time Point",title = title,subtitle = subtitle)+
+  theme_bw()+
+    theme(plot.title = element_text(hjust = 0.5,size=10,face = 'bold'),
+          plot.subtitle = element_text(hjust = 0.5,size=8),
+              legend.position="none",
+              axis.text.x=element_text(size=8,hjust=1,vjust = 0.5,angle=90),
+              axis.text.y=element_text(size=8),
+              axis.title.y = element_text(size=8),
+              axis.title.x = element_text(size=8),
+              panel.grid.major.x = element_line(linewidth =0.3,linetype = "solid"),
+              panel.grid.major.y = element_line(linewidth =0.2,linetype = "dashed", colour = "gray80"),
+              panel.grid.minor.y = element_line(linewidth =0.2,linetype = "dotted", colour = "gray80"))
+
+ if(hide_y_title){
+   p <- p + labs(y="")
+ }
+
+ if(hide_x_axis){
+    p <- p + labs(x="") +
+      theme(axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank())
+  }
+  return(p)
+}
+
+```
+
+```{r}
+library(patchwork)
+library(readr)
+library(ggplot2)
+library(ggsignif)
+sheets <- c("Enterobacterales_Chromagar","Enterococcus_agar",
+            "BKV_agar","Roggoso_agar_Lactobacillus",
+            "Enterobacterales_Cefotaxime", "Enbterobacterales_Meropenem","Enterobacterles_azithromycin",
+            "BKV_azithromycin", "BKV_meropenem")
+titles <-  c("Enterobacterales","Enterococcus",
+            "Bacteroides","Lactobacillus",
+            "Enterobacterales", "Enterobacterales", "Enterobacterales",
+            "Bacteroides", "Bacteroides")
+subtitles <- c("On CHROMagar","On CHROMagar",
+            "On BKV agar","On Rogosa agar",
+            "On CHROMagar and cefotaxime", "On CHROMagar and meropenem", "On CHROMagar and azithromycin",
+            "On BKV agar and azithromycin", "On BKV agar and meropenem")
+
+skip_stat <- c(F,F,F,F,F,T,F,F,F)
+hxs <- c(T,T,T,T,T,F,F,F,F)
+hys <- c(F,T,T,T,F,T,T,T,T)
+plot_list <- list()
+for( i in 1:length(sheets)){
+  sheet <- sheets[[i]]
+  print(sheet)
+  
+  cfu_data <- read.csv(paste0("../phenotypic_data/",sheet,".csv"))
+  
+  if(!skip_stat[[i]]){
+    stat <- stat_analysis(cfu_data,"../phenotypic_data/",sheet)
+  }
+  
+  plot_list[[sheet]]  <- plot_each_sheet(cfu_data,stat,titles[[i]],subtitles[[i]],hxs[[i]],hys[[i]])
+}
+
+# Plot all together using plot_grid
+p<- (plot_list[["Enterobacterales_Chromagar"]] | plot_list[["Enterococcus_agar"]] |
+  plot_list[["BKV_agar"]] |  plot_list[["Roggoso_agar_Lactobacillus"]]) /
+  (
+    (plot_list[["Enterobacterales_Cefotaxime"]]/ 
+    plot_list[["Enbterobacterales_Meropenem"]]) | 
+    plot_list[["Enterobacterles_azithromycin"]] |
+    plot_list[["BKV_azithromycin"]] | 
+    plot_list[["BKV_meropenem"]]
+    )
+
+p <- p + plot_layout(axes = "collect_x" ) + plot_annotation(tag_levels = 'A')
+p
+ggsave("../phenotypic_data/phenotypic_data.pdf", width = 10, height = 8,device = "pdf")
+
+
+```
+
+
+

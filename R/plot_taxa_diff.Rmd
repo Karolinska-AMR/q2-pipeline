@@ -1,0 +1,207 @@
+---
+title: "plot taxa"
+date: "2026-01-14"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(microbiome)   # for CLR
+library(phyloseq)
+```
+
+
+```{r}
+rm(list=ls())
+library(dplyr)
+library(qiime2R)
+
+metadata<-read_q2metadata("../artifacts/metadata.tsv")
+row.names(metadata)<- metadata$SampleID
+
+feature_table <-read_qza("../artifacts/table.qza")$data
+taxonomy_annot <- read_qza('../artifacts/taxonomy_classification/taxonomy.qza')$data
+taxonomy_annot <-taxonomy_annot %>% mutate(taxa = str_remove_all(Taxon, "D_\\d__")) %>%
+  separate_wider_delim(taxa, "; ", names = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),too_few = "align_start") %>%
+   mutate_at(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), list(~ substr(., 4, nchar(.))))
+
+taxonomy_annot <- taxonomy_annot %>%
+  mutate(across(c(Kingdom, Phylum, Class, Order, Family, Genus, Species),
+                ~ ifelse(. %in% c("", "unclassified", "k__", "p__", "c__", "o__", "f__", "g__", "s__") | is.na(.), 
+                         "Unclassified", .)))
+
+row.names(taxonomy_annot)<- taxonomy_annot$Feature.ID
+
+metadata <- metadata[colnames(feature_table), , drop = FALSE]
+taxonomy_annot <- taxonomy_annot[rownames(feature_table), , drop = FALSE]
+
+```
+
+```{r}
+aggregate_features <- function(feature_table, taxonomy_annot, rank = 'Genus') {
+  cat("Aggregating features by", rank, "level...\n")
+  
+  taxa_meta <- taxonomy_annot %>% select(c(Feature.ID, all_of(rank)))
+  
+  feature_table_agg <- as.data.frame(feature_table) %>% 
+    rownames_to_column(var = "Feature.ID") %>%
+    merge(taxa_meta, by = "Feature.ID", all.x = TRUE) %>% 
+    select(-'Feature.ID') %>%
+    mutate(across(!starts_with(rank), as.numeric)) %>%
+    group_by(across(all_of(rank))) %>% 
+    summarize(across(where(is.numeric), sum)) %>% 
+    ungroup() %>% 
+    as.data.frame()
+  
+  rank_val <- feature_table_agg[, rank]
+  row.names(feature_table_agg) <- replace(rank_val, is.na(rank_val), 'unknown')
+  feature_table_agg <- feature_table_agg[, -1]
+  feature_table_agg <- as.matrix(feature_table_agg)
+  
+  return(feature_table_agg)
+}
+
+clr_normalize <- function(count_matrix, pseudo = 1) {
+  
+  # Add small pseudo-count to avoid log(0)
+  count_matrix_adj <- count_matrix + pseudo
+  
+  # CLR transformation
+  clr_matrix <- compositions::clr(count_matrix_adj)
+  
+  # Convert back to matrix/data.frame with same dimnames
+  clr_matrix <- as.matrix(clr_matrix)
+  dimnames(clr_matrix) <- dimnames(count_matrix)
+  
+  cat("CLR normalization applied (pseudo-count =", pseudo, ")\n")
+  
+  return(clr_matrix)
+}
+
+ft_genus <- aggregate_features(feature_table,taxonomy_annot,'Genus')
+ft_genus_clr <- clr_normalize(ft_genus, pseudo = 1)
+
+ft_asv_clr <- clr_normalize(feature_table, pseudo = 1)
+write.csv(ft_asv_clr,"../export/clr_normalizations_asvs.csv")
+
+```
+
+```{r}
+taxa_to_plot <- c(
+  "Akkermansia",
+  "Sutterella",
+  "Parasutterella",
+  "Escherichia-Shigella",
+  "Haemophilus",
+  "Ruminococcus",
+  "Bifidobacterium",
+  "Roseburia",
+  "Anaerostipes",
+  "Blautia",
+  "Fusicatenibacter",
+  "Christensenella",
+  "Christensenellaceae_R-7_group",
+  "Bacteroides",
+  "Parabacteroides",
+  "Odoribacter"
+)
+
+
+df_plot <- ft_genus_clr %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "Genus") %>% 
+  pivot_longer(
+    cols = -Genus,
+    names_to = "sample",
+    values_to = "clr_value"
+  ) %>%
+  # Join with metadata (assuming metadata has row names as sample IDs)
+  left_join(
+    metadata %>% rownames_to_column("sample"),
+    by = "sample"
+  ) %>%
+  # Filter to the genera you want to plot
+  filter(Genus %in% taxa_to_plot) %>%
+  # Order the visits correctly
+  mutate(
+    Genus = factor(Genus, levels = taxa_to_plot),
+    visit = factor(visit, levels = c("v2", "v6", "v7", "v8"))
+  )
+
+write_csv(df_plot,'../export/longtudinal_traj_plot_data.csv')
+
+median_clr_by_visit <- df_plot %>%
+  group_by(Genus, visit) %>%
+  summarise(
+    median_clr = median(clr_value, na.rm = TRUE),
+    n_samples = n(),                     # optional: number of samples per group
+    .groups = "drop"
+  ) %>%
+  arrange(Genus, visit)
+
+write_csv(median_clr_by_visit,'../export/lmedian_clr_by_visit.csv')
+
+```
+
+```{r}
+library(Cairo)
+
+labels = c("v2"="Baseline 1", "v6"="Baseline 2", "v7"="1-week glasmacinal", "v8"="2-week glasmacinal")
+ 
+ggplot(df_plot, aes(x = visit, y = clr_value)) +
+  # geom_line(alpha = 0.25, color = "gray40") +
+  # geom_point(alpha = 0.4, size = 1.5) +
+  geom_boxplot(
+    aes(fill = visit),
+    alpha = 0.6,
+    width = 0.5,
+    linewidth = 0.2,
+    color="#313647"
+  ) +
+  # group-level summary
+  stat_summary(
+    aes(group = 1),
+    fun = median,
+    geom = "point",
+    color = "black",
+    size=1.5,
+    alpha=0.6
+    
+  ) +
+  stat_summary(
+    aes(group = 1),
+    fun = median,
+    geom = "line",
+    color = "black",
+    linetype = "twodash"
+  ) +
+  facet_wrap(~ Genus, scales = "free_y") +
+  scale_fill_manual(name="",values=c("#5CB338", "#FFB200","#A19AD3", "#A31D1D"))+
+  scale_color_manual(name="",values=c("#5CB338", "#FFB200","#A19AD3", "#A31D1D"))+
+  scale_x_discrete(labels=labels) +
+  labs(
+    x = "Time Point",
+    y = "CLR Abundance",
+  ) +
+  
+   theme_bw()+
+    theme(plot.title = element_text(hjust = 0.5),
+        #plot.margin = margin(r=20,l=10),
+        plot.caption = element_text(hjust = 0,size=12),
+              legend.position="none",legend.text=element_text(size= 16),
+              axis.text.x=element_text(size=8,hjust=1,vjust = 0.5,angle = 90),
+              axis.text.y=element_text(size=8),
+              axis.title.y = element_text(size=8),
+              axis.title.x = element_text(size=8),
+              strip.background = element_blank(), strip.placement = "outside", 
+              strip.text=element_text(size=8,face = "bold.italic"),
+              panel.grid.major.x = element_line(linewidth =0.1,linetype = "solid"),
+              panel.grid.major.y = element_line(linewidth =0.1,linetype = "dashed", colour = "gray80"),
+              panel.grid.minor.y = element_line(linewidth =0.1,linetype = "dotted", colour = "gray80"))
+
+ggsave("../export/longtudinal_traj_genera.pdf", height=8,width=9,device ='pdf')
+
+```
+
+
+
+

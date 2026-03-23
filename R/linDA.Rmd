@@ -1,0 +1,166 @@
+---
+title: "linDA"
+date: "2026-01-12"
+output: html_document
+---
+```{r}
+rm(list = ls())
+library(dplyr)
+library(qiime2R)
+library(tidyverse)
+library(reshape2)
+library(ggpubr)
+library(ggtext)
+library(pals)
+library(vegan)
+library(LinDA)
+
+metadata<-read_q2metadata("../artifacts/metadata.tsv")
+row.names(metadata)<- metadata$SampleID
+
+feature_table <-read_qza("../artifacts/table.qza")$data
+taxonomy_annot <- read_qza('../artifacts/taxonomy_classification/taxonomy.qza')$data
+
+# raw_counts <- taxonomy_annot %>% select("Feature.ID","Confidence","Taxon") %>% 
+#   merge(feature_table, by.x='Feature.ID',by.y = 'row.names',all.y = T)
+
+
+taxonomy_annot <-taxonomy_annot %>% mutate(taxa = str_remove_all(Taxon, "D_\\d__")) %>%
+  separate_wider_delim(taxa, "; ", names = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),too_few = "align_start") %>%
+   mutate_at(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), list(~ substr(., 4, nchar(.))))
+
+row.names(taxonomy_annot)<- taxonomy_annot$Feature.ID
+
+feature_table <- as.matrix(feature_table)
+
+sample_names_correct <- colnames(feature_table)
+metadata <- metadata[match(sample_names_correct, rownames(metadata)), ]
+metadata <- metadata %>%
+  tibble::rownames_to_column("SampleID_temp") %>%
+  filter(SampleID_temp %in% sample_names_correct) %>%
+  arrange(match(SampleID_temp, sample_names_correct)) %>%
+  tibble::column_to_rownames("SampleID_temp")
+
+if (!all(rownames(metadata) %in% metadata$SampleID)) {
+  warning("Some rownames in metadata do not match the SampleID column!")
+}
+
+metadata["subject_id"] = metadata['subject-id']
+```
+
+
+```{r}
+
+aggregate_features <- function(feature_table, taxonomy_annot, rank = 'Genus') {
+  cat("Aggregating features by", rank, "level...\n")
+  
+  taxa_meta <- taxonomy_annot %>% select(c(Feature.ID, all_of(rank)))
+  
+  feature_table_agg <- as.data.frame(feature_table) %>% 
+    rownames_to_column(var = "Feature.ID") %>%
+    merge(taxa_meta, by = "Feature.ID", all.x = TRUE) %>% 
+    select(-'Feature.ID') %>%
+    mutate(across(!starts_with(rank), as.numeric)) %>%
+    group_by(across(all_of(rank))) %>% 
+    summarize(across(where(is.numeric), sum)) %>% 
+    ungroup() %>% 
+    as.data.frame()
+  
+  rank_val <- feature_table_agg[, rank]
+  row.names(feature_table_agg) <- replace(rank_val, is.na(rank_val), 'unknown')
+  feature_table_agg <- feature_table_agg[, -1]
+  feature_table_agg <- as.matrix(feature_table_agg)
+  
+  return(feature_table_agg)
+}
+
+filter_features <- function(feature_table,metadata, threshold=0.3){
+    baselines <- c("v2","v6")
+    treatments <- c("v7","v8")
+    BL_samples <- metadata%>% filter(visit %in% baselines) %>% pull(SampleID)
+    TR_samples <- metadata%>% filter(visit %in% treatments) %>% pull(SampleID)
+   
+    BL_prv <- rowMeans(feature_table[,BL_samples] >=1, na.rm = T)
+    TR_prv <- rowMeans(feature_table[,TR_samples] >=1, na.rm = T)
+    
+    prevalence_df <- data.frame(
+        feature_ids = names(BL_prv),
+        prevalence_BL = BL_prv,
+        prevalence_TR = TR_prv
+      ) %>%
+        filter(prevalence_BL >= 0.30 | prevalence_TR>= 0.30)
+    
+    return(prevalence_df$feature_ids)
+
+}
+
+## Run differential abundant taxa on aggregated data ----
+run_dab_aggregated <- function(feature_table_agg, metadata) {
+  cat("Running LinDA analysis on aggregated data...\n")
+  
+  # remove low abundant features
+  
+  keep_fearures = filter_features(feature_table_agg,metadata,threshold = 0.3)
+  filter_features_agg <- feature_table_agg[keep_fearures,]
+  
+  results <- linda(
+    filter_features_agg,  # Matrix: taxa rows, samples columns
+    meta = metadata,              # Data.frame: samples rows, with covariates
+    formula = "~ visit + (1 | subject_id)",  # Fixed: visit; Random: subject_id for non-independence
+    alpha = 0.05,                 # Significance threshold (default 0.05)
+    prev.cut = 0,               # has been already filtered, so no more!
+    lib.cut = 1,               # no samples removal
+    winsor.quan = 0.97,            # Winsorize at 97th percentile for outliers
+    n.cores = parallel::detectCores() - 1
+  )
+  
+  return(results)
+}
+
+get_sigcombined <- function(linda_results,LFC=1){
+  v6 <- linda_results$output$visitv6
+  v6_sig <- v6 %>% filter(reject==T, abs(log2FoldChange)>=LFC) %>% 
+    tibble::rownames_to_column("taxa")
+
+  v7 <- linda_results$output$visitv7
+  v7_sig <- v7 %>% filter(reject==T, abs(log2FoldChange)>=LFC) %>% 
+    tibble::rownames_to_column("taxa")
+
+  v8 <- linda_results$output$visitv8
+  v8_sig <- v8 %>% filter(reject==T, abs(log2FoldChange)>=LFC)%>% 
+    tibble::rownames_to_column("taxa")
+  
+  combined_sig <- bind_rows(
+    v6_sig %>% mutate(visit = "v6"),
+    v7_sig %>% mutate(visit = "v7"),
+    v8_sig %>% mutate(visit = "v8")
+  ) %>% relocate(visit, .before = 1)
+  
+  return(combined_sig)
+}
+
+```
+
+```{r}
+
+linda_results <- run_dab_aggregated(feature_table,metadata)
+combined_sig <- get_sigcombined(linda_results,1)
+combined_sig <- combined_sig %>% 
+    merge(taxonomy_annot, by.x='taxa',by.y = 'Feature.ID')
+
+write_csv(combined_sig,'../export/linDA_ASVs_Sig_LFC1.csv')
+
+ranks <- ranks <- c("Phylum","Class","Order","Family","Genus")
+  for (rank in ranks) {
+    print(rank)
+    ft_agg <- aggregate_features(feature_table,taxonomy_annot,rank)
+    linda_results<-run_dab_aggregated(ft_agg,metadata)
+    combined_sig <- get_sigcombined(linda_results,1)
+    write_csv(combined_sig,paste0('../export/linDA_',rank,'_Sig_LFC1.csv'))
+
+  }
+
+```
+
+
+
