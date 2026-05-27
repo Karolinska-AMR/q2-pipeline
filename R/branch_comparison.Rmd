@@ -1,0 +1,1185 @@
+---
+title: "Glasmacinal Microbiome: Original vs RasperGade16S Branch Comparison"
+subtitle: "Assessing the effect of 16S rRNA gene copy-number correction on biological conclusions"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+    echo       = TRUE,
+    warning    = T,
+    message    = T,
+    fig.align  = "center",
+    dpi        = 300
+)
+
+# ── Required packages ─────────────────────────────────────────────────────────
+pkgs <- c(
+    "tidyverse", "qiime2R", "vegan", "ggplot2", "patchwork", "cowplot",
+    "UpSetR", "scales", "ggrepel", "pheatmap", "RColorBrewer",
+    "knitr", "kableExtra", "gt", "gtsummary", "ape"
+)
+
+for (p in pkgs) {
+    if (!requireNamespace(p, quietly = TRUE)) {
+        message("Installing: ", p)
+        if (p %in% c("qiime2R")) {
+            if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+            remotes::install_github("jbisanz/qiime2R")
+        } else {
+            install.packages(p, quiet = TRUE)
+        }
+    }
+    suppressPackageStartupMessages(library(p, character.only = TRUE))
+}
+```
+
+```{r}
+# =============================================
+# Run the preparation script first
+# =============================================
+cat("=== Running render_comparison.R ===\n\n")
+
+source("render_comparison.R")
+
+cat("\n=== File preparation completed ===\n\n")
+```
+
+
+```{r directories}
+rm(list=ls())
+# Set this to your project base directory
+PROJECT_DIR <- "~/projects/microbiome"
+# Source files from workflow output
+WORKFLOW_DIR <- file.path(PROJECT_DIR, "workflow_results")
+ANALYSIS_DIR <- file.path(WORKFLOW_DIR, "branch_comparison")
+
+setwd(ANALYSIS_DIR)
+# ── Directory structure ────────────────────────────────────────────────────────
+# Adjust INPUT_DIR to your workflow_results path
+INPUT_ORIG  <- file.path(ANALYSIS_DIR,"input/original")       # Branch A artifacts
+INPUT_RASP  <- file.path(ANALYSIS_DIR,"input/raspergade")    # Branch B artifacts
+INPUT_STATS <- file.path(ANALYSIS_DIR,"input/stats")         # CSV statistical outputs (both branches)
+
+dir.create("figures",       showWarnings = FALSE, recursive = TRUE)
+dir.create("tables",        showWarnings = FALSE, recursive = TRUE)
+dir.create("results",       showWarnings = FALSE, recursive = TRUE)
+dir.create("figures/alpha", showWarnings = FALSE)
+dir.create("figures/beta",  showWarnings = FALSE)
+dir.create("figures/da",    showWarnings = FALSE)
+dir.create("figures/table", showWarnings = FALSE)
+
+# ── Expected input files ───────────────────────────────────────────────────────
+# Adjust paths to match your actual directory structure.
+# Default: mirrors workflow_revision.sh output directories.
+paths <- list(
+    # Original branch
+    orig_table     = file.path(INPUT_ORIG, "table.qza"),
+    orig_taxonomy  = file.path(INPUT_ORIG, "taxonomy.qza"),
+    orig_faith     = file.path(INPUT_ORIG, "faith_pd_vector.qza"),
+    orig_evenness  = file.path(INPUT_ORIG, "evenness_vector.qza"),
+    orig_wunifrac  = file.path(INPUT_ORIG, "weighted_unifrac_distance_matrix.qza"),
+    orig_wunifrac_pcoa  = file.path(INPUT_ORIG, "weighted_unifrac_pcoa_results.qza"),
+
+    # RasperGade branch
+    rasp_table     = file.path(INPUT_RASP, "table-corrected.qza"),
+    rasp_taxonomy  = file.path(INPUT_ORIG, "taxonomy.qza"),  # shared
+    rasp_faith     = file.path(INPUT_RASP, "faith_pd_vector.qza"),
+    rasp_evenness  = file.path(INPUT_RASP, "evenness_vector.qza"),
+    rasp_wunifrac  = file.path(INPUT_RASP, "weighted_unifrac_distance_matrix.qza"),
+    rasp_wunifrac_pcoa  = file.path(INPUT_RASP, "weighted_unifrac_pcoa_results.qza"),
+
+    # Metadata
+    metadata       = file.path(ANALYSIS_DIR,"input/meta_data.tsv"),
+
+    # CSV stats — original
+    orig_faith_anova      = file.path(INPUT_STATS, "original/faith_pd_lmm_anova.csv"),
+    orig_faith_emmeans    = file.path(INPUT_STATS, "original/faith_pd_lmm_pairwise_emmeans.csv"),
+    orig_even_anova       = file.path(INPUT_STATS, "original/pielou_evenness_lmm_anova.csv"),
+    orig_even_emmeans     = file.path(INPUT_STATS, "original/pielou_evenness_lmm_pairwise_emmeans.csv"),
+    orig_perm             = file.path(INPUT_STATS, "original/weighted_unifrac_pairwise_adonis.csv"),
+    orig_linDA_asv        = file.path(INPUT_STATS, "original/linDA_ASVs_Sig_LFC1.csv"),
+    orig_linDA_genus      = file.path(INPUT_STATS, "original/linDA_Genus_Sig_LFC1.csv"),
+    orig_linDA_family     = file.path(INPUT_STATS, "original/linDA_Family_Sig_LFC1.csv"),
+    orig_linDA_order      = file.path(INPUT_STATS, "original/linDA_Order_Sig_LFC1.csv"),
+    orig_linDA_class      = file.path(INPUT_STATS, "original/linDA_Class_Sig_LFC1.csv"),
+    orig_linDA_phylum     = file.path(INPUT_STATS, "original/linDA_Phylum_Sig_LFC1.csv"),
+
+    # CSV stats — RasperGade
+    rasp_faith_anova      = file.path(INPUT_STATS, "raspergade/faith_pd_lmm_anova.csv"),
+    rasp_faith_emmeans    = file.path(INPUT_STATS, "raspergade/faith_pd_lmm_pairwise_emmeans.csv"),
+    rasp_even_anova       = file.path(INPUT_STATS, "raspergade/pielou_evenness_lmm_anova.csv"),
+    rasp_even_emmeans     = file.path(INPUT_STATS, "raspergade/pielou_evenness_lmm_pairwise_emmeans.csv"),
+    rasp_perm             = file.path(INPUT_STATS, "raspergade/weighted_unifrac_pairwise_adonis.csv"),
+    rasp_linDA_asv        = file.path(INPUT_STATS, "raspergade/linDA_ASVs_Sig_LFC1.csv"),
+    rasp_linDA_genus      = file.path(INPUT_STATS, "raspergade/linDA_Genus_Sig_LFC1.csv"),
+    rasp_linDA_family     = file.path(INPUT_STATS, "raspergade/linDA_Family_Sig_LFC1.csv"),
+    rasp_linDA_order      = file.path(INPUT_STATS, "raspergade/linDA_Order_Sig_LFC1.csv"),
+    rasp_linDA_class      = file.path(INPUT_STATS, "raspergade/linDA_Class_Sig_LFC1.csv"),
+    rasp_linDA_phylum     = file.path(INPUT_STATS, "raspergade/linDA_Phylum_Sig_LFC1.csv")
+)
+
+# ── Check which files exist ────────────────────────────────────────────────────
+missing <- names(paths)[!sapply(paths, file.exists)]
+if (length(missing) > 0) {
+    message("⚠ Missing files (analysis will proceed with available data):")
+    for (m in missing) message("  - ", m, " → ", paths[[m]])
+}
+```
+
+```{r palettes}
+# ── Shared aesthetics ──────────────────────────────────────────────────────────
+PAL_BRANCH  <- c("Original" = "#00809D", "GCN-corrected" = "#9F1861")
+PAL_VISIT   <- c("v2" = "#5CB338", "v6" = "#FFB200",
+                 "v7" = "#A19AD3", "v8" = "#A31D1D")
+THEME_BASE <-  theme_bw(base_size = 12)+
+        theme(plot.title = element_text(hjust = 0.5,size=10,face = 'bold.italic'),
+          plot.subtitle = element_text(hjust = 0.5,size=8),
+              legend.position="none",
+              axis.text.x=element_text(size=9,hjust=0.5,vjust = 0.5,angle=0),
+              axis.text.y=element_text(size=9),
+              axis.title.y = element_text(size=9),
+              axis.title.x = element_text(size=9),
+              strip.background = element_rect(fill = "#F5F5F5",color=NA,linewidth = 0),
+              strip.text = element_text(face = "bold",size = 10,colour = "#2C3E50"),
+              panel.grid.major.x = element_line(linewidth =0.3,linetype = "solid"),
+              panel.grid.major.y = element_line(linewidth =0.2,linetype = "dashed", colour = "gray80"),
+              panel.grid.minor.y = element_line(linewidth =0.2,linetype = "dotted", colour = "gray80"))
+
+labels = c("v2"="Baseline 1", "v6"="Baseline 2", "v7"="1-week glasmacinal", "v8"="2-week glasmacinal")
+labels_short = c("v2"="BL1", "v6"="BL2", "v7"="1W", "v8"="2W")
+# 
+# THEME_BASE  <- theme_bw(base_size = 12) +
+#     theme(panel.grid.minor = element_blank(),
+#           strip.background = element_rect(fill = "grey92"),
+#           legend.position  = "bottom")
+
+save_fig <- function(name, p, w = 10, h = 6) {
+    ggsave(file.path(ANALYSIS_DIR,"figures", name), p, width = w, height = h, device = "pdf")
+    invisible(p)
+}
+save_tbl <- function(name, tbl) {
+    write_csv(tbl, file.path(ANALYSIS_DIR,"tables", name))
+    invisible(tbl)
+}
+```
+
+---
+
+# 1  Feature Table Comparison
+
+```{r load-tables}
+# ── Load feature tables from QZA ──────────────────────────────────────────────
+read_table_qza <- function(path, label) {
+    if (!file.exists(path)) {
+        warning("Table not found: ", path)
+        return(NULL)
+    }
+    tbl <- read_qza(path)$data
+    mat <- as(tbl, "matrix")
+    tibble(
+        branch        = label,
+        total_reads   = sum(mat),
+        n_asvs        = nrow(mat),
+        n_samples     = ncol(mat),
+        min_depth     = min(colSums(mat)),
+        median_depth  = median(colSums(mat)),
+        max_depth     = max(colSums(mat))
+    )
+}
+
+orig_mat  <- if (file.exists(paths$orig_table))
+    as(read_qza(paths$orig_table)$data, "matrix") else NULL
+
+rasp_mat  <- if (file.exists(paths$rasp_table))
+    as(read_qza(paths$rasp_table)$data, "matrix") else NULL
+
+tbl_summary <- bind_rows(
+    if (!is.null(orig_mat)) read_table_qza(paths$orig_table, "Original"),
+    if (!is.null(rasp_mat)) read_table_qza(paths$rasp_table, "GCNs correction")
+)
+
+tbl_summary %>%
+    mutate(across(where(is.numeric), ~ scales::comma(.x, accuracy = 1))) %>%
+    kbl(caption = "Feature table summary: Original vs 16S Gene copy numbers (GCNs) correction ") %>%
+    kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+save_tbl("01_feature_table_summary.csv", tbl_summary)
+```
+
+## 1.1 Per-sample sequencing depth
+
+```{r depth-histogram}
+library(patchwork)
+if (!is.null(orig_mat) && !is.null(rasp_mat)) {
+    depth_df <- bind_rows(
+        tibble(branch = "Original",   sample = colnames(orig_mat), depth = colSums(orig_mat)),
+        tibble(branch = "GCNs correction", sample = colnames(rasp_mat), depth = colSums(rasp_mat))
+    ) %>%
+        mutate(branch = factor(branch, levels = c("Original", "GCNs correction")))
+
+    p_depth_hist <- ggplot(depth_df, aes(x = depth, fill = branch)) +
+        geom_histogram(bins = 30, alpha = 0.7, position = "identity") +
+        scale_fill_manual(values = PAL_BRANCH) +
+        scale_x_continuous(labels = comma) +
+        facet_wrap(~branch, ncol = 1) +
+        labs(#title = "Per-sample sequencing depth",
+             x = "Reads per sample", y = "Number of samples", fill = NULL) +
+        THEME_BASE + theme(legend.position = "none")
+
+    print(p_depth_hist)
+    save_fig("alpha/01_depth_histogram.pdf", p_depth_hist, w = 8, h = 6)
+
+    # Paired per-sample depth comparison
+    common_samples <- intersect(colnames(orig_mat), colnames(rasp_mat))
+    depth_paired <- tibble(
+        sample  = common_samples,
+        orig    = colSums(orig_mat)[common_samples],
+        rasp    = colSums(rasp_mat)[common_samples],
+        pct_change = 100 * (rasp - orig) / orig
+    )
+    
+    # correlations
+  pearson_r <- cor(depth_paired$orig,depth_paired$rasp,method = "pearson",use = "complete.obs")
+  spearman_rho <- cor(depth_paired$orig,depth_paired$rasp,method = "spearman",use = "complete.obs")
+
+  lims <- range(c(depth_paired$orig, depth_paired$rasp), na.rm = TRUE)
+
+    p_depth_scatter <- ggplot(depth_paired, aes(x = orig, y = rasp)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+      geom_smooth(method = "lm",se = FALSE,colour = "#F08D39",linewidth = 0.3) +
+       geom_point(aes(colour = pct_change), size = 3, alpha = 0.8) +
+        scale_colour_gradient2(low = "#2FA4D7", mid = "grey90", high = "#D6604D",
+                               midpoint = 0, name = "% change") +
+      coord_equal(xlim = lims, ylim = lims)+
+      #xlim(lims)+ylim(lims)+
+      scale_x_continuous(labels = comma) +
+      scale_y_continuous(labels = comma) +
+      labs(#title = "Per-sample depth: Original vs GCNs correction", subtitle = "Dashed line = no change; solid line = fitted trend",
+             x = "Original reads", y = "16S GCN-corrected reads") +
+      annotate("text",y =75e3,x = 135e3,
+               hjust = 0,vjust = 1,label = paste0("Pearson r = ", round(pearson_r, 3),
+                                                  "\nSpearman p = ", round(spearman_rho, 3)),
+               size = 3) +
+        THEME_BASE
+
+    print(p_depth_scatter)
+    save_fig("alpha/01_depth_scatter.pdf", p_depth_scatter, w = 7, h = 6)
+
+    save_tbl("01_per_sample_depth.csv", depth_paired)
+    
+    p_combined <- p_depth_hist|p_depth_scatter
+    p_combined <- p_combined + plot_annotation(tag_levels = 'A') + plot_layout(width = c(1,2))
+    print(p_combined)
+    save_fig("alpha/01_depth_combined.pdf",p_combined, w = 10, h = 6)
+}
+```
+
+## 1.2 ASV abundance correlation
+
+```{r asv-correlation}
+if (!is.null(orig_mat) && !is.null(rasp_mat)) {
+    common_asvs    <- intersect(rownames(orig_mat), rownames(rasp_mat))
+    common_samples <- intersect(colnames(orig_mat), colnames(rasp_mat))
+
+    orig_totals <- rowSums(orig_mat[common_asvs, common_samples])
+    rasp_totals <- rowSums(rasp_mat[common_asvs, common_samples])
+
+    asv_cor_df <- tibble(
+        asv         = common_asvs,
+        orig_abund  = orig_totals,
+        rasp_abund  = rasp_totals,
+        pct_change  = 100 * (rasp_totals - orig_totals) / (orig_totals + 1),
+        log2_ratio  = log2((rasp_totals + 1) / (orig_totals + 1))
+    ) %>%
+        arrange(desc(abs(log2_ratio)))
+
+    # Pearson + Spearman correlation
+    r_pearson  <- cor(asv_cor_df$orig_abund, asv_cor_df$rasp_abund, method = "pearson")
+    r_spearman <- cor(asv_cor_df$orig_abund, asv_cor_df$rasp_abund, method = "spearman")
+
+    top_changed <- asv_cor_df %>% slice_head(n = 15)
+
+    p_asv_cor <- ggplot(asv_cor_df, aes(x = log10(orig_abund + 1), y = log10(rasp_abund + 1))) +
+        geom_point(aes(colour = log2_ratio), alpha = 0.5, size = 1.5) +
+        geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey40") +
+        scale_colour_gradient2(low = "#2166AC", mid = "grey80", high = "#D6604D",
+                               midpoint = 0, name = "log2 ratio") +
+        annotate("text", x = 0.2, y = max(log10(asv_cor_df$rasp_abund + 1)) * 0.95,
+                 label = sprintf("Pearson r = %.3f\nSpearman ρ = %.3f", r_pearson, r_spearman),
+                 hjust = 0, size = 3.5) +
+        labs(#title = "ASV abundance correlation: Original vs RasperGade",
+             x = "log10(Original total abundance + 1)",
+             y = "log10(GCN-corrected total abundance + 1)") +
+        THEME_BASE
+
+    print(p_asv_cor)
+    save_fig("alpha/01_asv_abundance_correlation.png", p_asv_cor, w = 8, h = 6)
+
+    # Top 15 most-changed ASVs
+    top_changed %>%
+        mutate(across(where(is.numeric), ~ round(.x, 2))) %>%
+        kbl(caption = "Top 15 ASVs most affected by copy-number correction (by |log2 ratio|)") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+    save_tbl("01_asv_most_changed.csv", asv_cor_df)
+}
+```
+
+## 1.3 Feature prevalence comparison
+
+```{r prevalence}
+if (!is.null(orig_mat) && !is.null(rasp_mat)) {
+    common_asvs <- intersect(rownames(orig_mat), rownames(rasp_mat))
+
+    prev_df <- tibble(
+        asv          = common_asvs,
+        prev_orig    = rowMeans(orig_mat[common_asvs, ] > 0),
+        prev_rasp    = rowMeans(rasp_mat[common_asvs, ] > 0)
+    )
+
+    p_prev <- ggplot(prev_df, aes(x = prev_orig, y = prev_rasp)) +
+        geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+        geom_point(alpha = 0.4, size = 1.5, colour = "#2166AC") +
+        scale_x_continuous(labels = percent_format()) +
+        scale_y_continuous(labels = percent_format()) +
+        labs(title = "ASV prevalence: Original vs RasperGade",
+             x = "Prevalence (Original)", y = "Prevalence (RasperGade)") +
+        THEME_BASE
+
+    print(p_prev)
+    save_fig("alpha/01_prevalence.pdf", p_prev, w = 6, h = 6)
+}
+```
+
+---
+
+# 2  Alpha Diversity Comparison
+
+```{r load-alpha}
+# ── Load alpha diversity from QZA ─────────────────────────────────────────────
+read_alpha_qza <- function(path, branch, metric) {
+    if (!file.exists(path)) return(NULL)
+  
+    if(branch == 'Original' | metric== "Pielou Evenness"){
+      df <- read_qza(path)$data %>%
+          rownames_to_column("sample_id") %>%
+          mutate(branch = branch, metric = metric)
+      colnames(df)[2] <- "value"
+    }else{
+      df <- read_qza(path)$data%>%
+        select(sample_id=V1,value=V2) %>%
+        mutate(branch = branch, metric = metric)
+    }
+  df
+    
+}
+
+meta <- if (file.exists(paths$metadata))
+    read_tsv(paths$metadata, show_col_types = FALSE) %>%
+        mutate(visit = case_when(
+                      timepoint == "Baseline 1"   ~ "v2",
+                      timepoint == "Baseline 2"   ~ "v6",
+                      timepoint == "1-week EP395" ~ "v7",
+                      timepoint == "2-week EP395" ~ "v8",
+                      TRUE                        ~ timepoint   # keep everything else the same
+                    )) %>%
+        rename(sample_id = `sample-id`) else NULL
+visits_levels <- c("v2", "v6", "v7", "v8")
+
+alpha_df <- bind_rows(
+    read_alpha_qza(paths$orig_faith,    "Original",   "Faith
+                   PD"),
+    read_alpha_qza(paths$rasp_faith,    "GCN-corrected", "Faith PD"),
+    read_alpha_qza(paths$orig_evenness, "Original",   "Pielou Evenness"),
+    read_alpha_qza(paths$rasp_evenness, "GCN-corrected", "Pielou Evenness")
+) %>%
+    mutate(branch = factor(branch, levels = c("Original", "GCN-corrected")))
+
+# Merge with metadata
+if (!is.null(meta)) {
+    alpha_df <- alpha_df %>%
+        left_join(meta, by = "sample_id") %>%
+      mutate(visit = factor(visit, levels = visits_levels))
+}
+
+cat("Alpha diversity data loaded:", nrow(alpha_df), "observations\n")
+```
+
+## 2.1 Side-by-side boxplots
+
+```{r alpha-boxplots, fig.width=12, fig.height=6}
+if (nrow(alpha_df) > 0) {
+    p_alpha_box <- ggplot(alpha_df, aes(x = branch, y = value, fill = branch)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.6) +
+        geom_jitter(width = 0.15, alpha = 0.5, size = 1.5) +
+        scale_fill_manual(values = PAL_BRANCH) +
+        
+        facet_wrap(.~metric, scales = "free_y", ncol = 1) +
+        labs(#title = "Alpha diversity: Original vs RasperGade",
+             x = NULL, y = "Diversity value", fill = NULL) +
+        THEME_BASE + theme(legend.position = "none")
+
+    print(p_alpha_box)
+    save_fig("alpha/02_alpha_boxplots.pdf", p_alpha_box, w = 10, h = 5)
+}
+```
+
+## 2.2 Timepoint-stratified boxplots
+
+```{r alpha-by-timepoint, fig.width=14, fig.height=6}
+if (nrow(alpha_df) > 0 && "timepoint" %in% colnames(alpha_df)) {
+    p_alpha_tp <- ggplot(alpha_df,
+                         aes(x = visit, y = value, fill = branch)) +
+        geom_boxplot(outlier.shape = NA, alpha = 0.7,
+                     position = position_dodge(0.8), width = 0.7) +
+        geom_point(position = position_dodge(0.8),
+                   alpha = 0.5, size = 1.5) +
+        scale_fill_manual(values = PAL_BRANCH) +
+        scale_x_discrete(labels=labels_short) +
+        facet_wrap(~metric, scales = "free_y", ncol =1) +
+        labs(#title = "Alpha diversity by timepoint: Original vs RasperGade",
+             x = "Timepoint", y = "Diversity value", fill = "Branch") +
+        THEME_BASE
+
+    print(p_alpha_tp)
+    save_fig("alpha/02_alpha_by_timepoint.pdf", p_alpha_tp, w = 12, h = 6)
+    
+    p_combined <-     p_alpha_box | p_alpha_tp
+    p_combined <- p_combined + plot_annotation(tag_levels = 'A') + plot_layout(width = c(1,2))
+    print(p_combined)
+    save_fig("alpha/02_alpha_combined.pdf",p_combined, w = 8, h = 8)
+}
+```
+
+## 2.3 Paired per-sample comparison
+
+```{r alpha-paired, fig.width=10, fig.height=5}
+if (nrow(alpha_df) > 0) {
+    alpha_wide <- alpha_df %>%
+        select(sample_id, branch, metric, value) %>%
+        pivot_wider(names_from = branch, values_from = value)
+
+    if ("Original" %in% colnames(alpha_wide) &&  "GCNs correction" %in% colnames(alpha_wide)) {
+        p_paired <- ggplot(alpha_wide, aes(x = Original, y = `GCNs correction`)) +
+            geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+            geom_point(alpha = 0.6, size = 2, colour = "#2166AC") +
+            facet_wrap(~metric, scales = "free", ncol = 2) +
+            labs(title = "Per-sample alpha diversity: Original vs RasperGade",
+                 subtitle = "Dashed line = no change") +
+            THEME_BASE
+
+        print(p_paired)
+        save_fig("alpha/02_alpha_paired.png", p_paired, w = 10, h = 5)
+
+        # Correlation statistics
+        alpha_cor <- alpha_wide %>%
+            group_by(metric) %>%
+            summarise(
+                pearson_r  = cor(Original, `GCNs correction`, method = "pearson",  use = "complete.obs"),
+                spearman_r = cor(Original, `GCNs correction`, method = "spearman", use = "complete.obs"),
+                mean_diff  = mean(`GCNs correction` - Original, na.rm = TRUE),
+                sd_diff    = sd(`GCNs correction` - Original, na.rm = TRUE)
+            )
+
+        alpha_cor %>%
+            mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+            kbl(caption = "Alpha diversity correlation: Original vs RasperGade") %>%
+            kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+        save_tbl("02_alpha_diversity_correlation.csv", alpha_cor)
+    }
+}
+```
+
+## 2.4 LMM statistics comparison
+
+```{r lmm-table}
+read_csv_safe <- function(path) {
+    if (file.exists(path)) read_csv(path, show_col_types = FALSE) else NULL
+}
+
+make_lmm_comparison <- function(metric_name, orig_anova_path, rasp_anova_path) {
+    o <- read_csv_safe(orig_anova_path)
+    r <- read_csv_safe(rasp_anova_path)
+    if (is.null(o) || is.null(r)) return(NULL)
+
+    bind_rows(
+        mutate(o, branch = "Original",   metric = metric_name),
+        mutate(r, branch = "RasperGade", metric = metric_name)
+    )
+}
+
+lmm_faith <- make_lmm_comparison(
+    "Faith PD",
+    paths$orig_faith_anova,
+    paths$rasp_faith_anova
+)
+
+lmm_even <- make_lmm_comparison(
+    "Pielou Evenness",
+    paths$orig_even_anova,
+    paths$rasp_even_anova
+)
+
+lmm_all <- bind_rows(lmm_faith, lmm_even)
+
+if (nrow(lmm_all) > 0) {
+    lmm_all %>%
+        mutate(across(where(is.numeric), ~ round(.x, 4))) %>%
+        arrange(metric, branch) %>%
+        kbl(caption = "LMM ANOVA statistics: Original vs RasperGade") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+        row_spec(which(lmm_all$`Pr(>F)` < 0.05), bold = TRUE, color = "white", background = "#2166AC")
+
+    save_tbl("02_lmm_anova_comparison.csv", lmm_all)
+}
+```
+
+## 2.5 Pairwise contrasts comparison
+
+```{r emmeans-table}
+make_emmeans_comparison <- function(metric_name, orig_path, rasp_path) {
+    o <- read_csv_safe(orig_path)
+    r <- read_csv_safe(rasp_path)
+    if (is.null(o) || is.null(r)) return(NULL)
+
+    full_join(o, r, by = "contrast", suffix = c("_orig", "_rasp")) %>%
+        mutate(
+            metric = metric_name,
+            sig_orig = p.value_orig < 0.05,
+            sig_rasp = p.value_rasp < 0.05,
+            sig_changed = sig_orig != sig_rasp
+        ) %>%
+        arrange(contrast)
+}
+
+emmeans_faith <- make_emmeans_comparison(
+    "Faith PD",
+    paths$orig_faith_emmeans,
+    paths$rasp_faith_emmeans
+)
+
+emmeans_even <- make_emmeans_comparison(
+    "Pielou Evenness",
+    paths$orig_even_emmeans,
+    paths$rasp_even_emmeans
+)
+
+emmeans_all <- bind_rows(emmeans_faith, emmeans_even)
+
+if (!is.null(emmeans_all) && nrow(emmeans_all) > 0) {
+    emmeans_all %>%
+        select(metric, contrast, estimate_orig, p.value_orig, estimate_rasp, p.value_rasp,
+               sig_orig, sig_rasp, sig_changed) %>%
+        mutate(across(c(estimate_orig, estimate_rasp, p.value_orig, p.value_rasp),
+                      ~ round(.x, 4))) %>%
+        kbl(caption = "Pairwise contrasts: Original vs RasperGade") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+        row_spec(which(emmeans_all$sig_changed), bold = TRUE, background = "#FFF3CD")
+
+    n_changed <- sum(emmeans_all$sig_changed, na.rm = TRUE)
+    cat(sprintf("\n⚠ Contrasts that changed significance: %d / %d\n",
+                n_changed, nrow(emmeans_all)))
+
+    save_tbl("02_emmeans_comparison.csv", emmeans_all)
+}
+```
+
+---
+
+# 3  Beta Diversity Comparison
+
+```{r load-beta}
+read_dist_qza <- function(path) {
+    if (!file.exists(path)) return(NULL)
+    as.dist(read_qza(path)$data)
+}
+
+dist_orig <- read_dist_qza(paths$orig_wunifrac)
+dist_rasp <- read_dist_qza(paths$rasp_wunifrac)
+```
+
+```{r}
+
+plot_beta_diversity <- function(pcoaResults,metadata,title){
+  library(qiime2R)
+  library(ggplot2)
+  library(dplyr)
+  library(tidyverse)
+  library(ggrepel)
+  library(ggforce)
+  library(ggtext)
+  library(ggside)
+
+  pca_tbl<- pcoaResults$data$Vectors
+  
+  pc_variances <- pca_tbl %>%  summarize(across(everything(), var))
+  total_variance <- sum(pc_variances,na.rm = T)
+  proportion_variance <- round(100.0 * pc_variances / total_variance,2)  
+
+  pca_tbl<-merge(x=pca_tbl %>% select(sample_id=SampleID,PC1,PC2),y=metadata,by='sample_id')
+  
+  pca_tbl$ovisit <- pca_tbl$visit
+  pca_tbl <- pca_tbl %>%
+    mutate(visit = case_when(
+      ovisit == "v2" ~ "BL1",
+      ovisit == "v6" ~ "BL2",
+      ovisit == "v7" ~ "1W",
+      ovisit == "v8" ~ "2W",
+      TRUE ~ ovisit 
+    )) %>% mutate(visit=factor(visit,levels=c("BL1", "BL2",
+                                              "1W", "2W")))
+   print(str(pca_tbl[, c("visit", "PC1", "PC2")]))
+ 
+   p<- ggplot(data=pca_tbl,aes(shape=visit,x=PC2, y=PC1)) +
+          geom_point(aes(fill=visit),size=3,alpha=.7,stroke=0.5,color='black')+
+          scale_shape_manual(name="",values=c(21,24,22,23)) +
+          scale_fill_manual(name="",values =c("#5CB338", "#FFB200","#A19AD3", "#A31D1D") )+
+          labs(y=paste0("PCoA1 [",proportion_variance$PC1,"%]"),x=paste0("PCoA2 [",proportion_variance$PC2,"%]"))+
+          annotate("text", x = -0.29, y = 0.34,
+                 label = title,
+                 hjust = 0, size = 3.5) +
+          theme_bw()+
+          theme(text=element_text(size=10),
+                axis.title=element_text(size=10),
+                legend.text=element_text(size=9),
+                legend.title = element_text(size=10),
+                legend.position="bottom", legend.box="horizontal",
+                axis.title.x = element_text(size = 9, margin = margin(t = 5, unit = "pt")),
+                axis.title.y = element_text(size = 9, margin = margin(r = 0, unit = "pt"))
+                ) +
+    # Y-side: Boxplots of PC1 ~ visit (vertical orientation, shared y-axis)
+    geom_ysideboxplot(aes(x = visit, y = PC1, fill = visit),  orientation = "x",# Local aes: use PC1 on shared y
+                      inherit.aes = FALSE, varwidth = TRUE, alpha = 0.7,linewidth = 0.2, show.legend = FALSE) +
+       theme(ggside.axis.text.y = element_blank(),
+          ggside.axis.ticks.y =  element_blank())+
+
+
+
+# X-side: Boxplots of PC2 ~ visit (horizontal orientation, shared x-axis)
+geom_xsideboxplot(aes(y = visit, x = PC2, fill = visit), orientation = "y", # Local aes: use PC2 on shared x
+                  inherit.aes = FALSE, varwidth = TRUE, alpha = 0.7,linewidth = 0.2, show.legend = FALSE) +
+#theme(ggside.axis.text.x = element_text(size = 10, angle = -90, hjust = 0, vjust = 0)) +
+theme(ggside.axis.text.x = element_blank(),
+      ggside.axis.ticks.x= element_blank())+
+    guides(shape = guide_legend(ncol = 4)) + 
+theme(legend.position = "bottom",
+      legend.justification = "center",
+      legend.margin = margin(0, 0, 0, 0),  # remove margins
+      legend.box.margin = margin(0, 0, 0, 0),  # negative top margin to pull closer
+      legend.direction = "horizontal")  # horizontal legend often works better at bottom
+  
+  return(p)
+}
+
+
+```
+
+## 3.1 PCoA ordinations
+
+```{r pcoa-plots}
+make_pcoa_plot <- function(dist, title, meta = NULL, color_col = "visit") {
+    if (is.null(dist)) return(NULL)
+    pcoa_res <- cmdscale(dist, k = 2, eig = TRUE)
+    var_exp  <- pcoa_res$eig / sum(abs(pcoa_res$eig)) * 100
+
+    df <- as_tibble(pcoa_res$points, .name_repair = "unique") %>%
+        setNames(c("PC1", "PC2")) %>%
+        mutate(sample_id = labels(dist))
+
+    if (!is.null(meta) && color_col %in% colnames(meta)) {
+        df <- left_join(df, meta %>% select(sample_id, all_of(color_col)), by = "sample_id")
+    } else {
+        df[[color_col]] <- NA
+    }
+
+    ggplot(df, aes(x = PC1, y = PC2, colour = .data[[color_col]])) +
+        geom_point(size = 3, alpha = 0.8) +
+        stat_ellipse(level = 0.8, linetype = "dashed", linewidth = 0.5) +
+        scale_colour_manual(values = PAL_VISIT, na.value = "grey50",
+                            name = color_col) +
+        labs(title = title,
+             x = sprintf("PC1 (%.1f%%)", var_exp[1]),
+             y = sprintf("PC2 (%.1f%%)", var_exp[2])) +
+        THEME_BASE
+}
+
+#p_pcoa_orig <- make_pcoa_plot(dist_orig, "Weighted UniFrac PCoA — Original", meta)
+#p_pcoa_rasp <- make_pcoa_plot(dist_rasp, "Weighted UniFrac PCoA — RasperGade", meta)
+
+p_pcoa_orig<- plot_beta_diversity(read_qza(paths$orig_wunifrac_pcoa),meta,"Original")
+p_pcoa_rasp<- plot_beta_diversity(read_qza(paths$rasp_wunifrac_pcoa),meta,"16S GCN-corrected")
+
+if (!is.null(p_pcoa_orig) && !is.null(p_pcoa_rasp)) {
+    p_pcoa_combined <- p_pcoa_orig/p_pcoa_rasp +
+        plot_layout(guides = "collect") &
+        theme(legend.position = "top")
+    print(p_pcoa_combined)
+    save_fig("beta/03_pcoa_comparison.pdf", p_pcoa_combined, w = 6, h = 10)
+}
+```
+
+## 3.2 Procrustes analysis
+
+```{r procrustes}
+if (!is.null(dist_orig) && !is.null(dist_rasp)) {
+  
+    labels = list("Original" = "Original", "RasperGade"="16S GCN-corrected")
+    common_samples <- intersect(labels(dist_orig), labels(dist_rasp))
+
+    mat_orig <- as.matrix(dist_orig)[common_samples, common_samples]
+    mat_rasp <- as.matrix(dist_rasp)[common_samples, common_samples]
+
+    pcoa_orig <- cmdscale(as.dist(mat_orig), k = min(length(common_samples) - 1, 10))
+    pcoa_rasp <- cmdscale(as.dist(mat_rasp), k = min(length(common_samples) - 1, 10))
+
+
+    proc <- procrustes(pcoa_orig, pcoa_rasp, symmetric = TRUE)
+    prot <- protest(pcoa_orig, pcoa_rasp, permutations = 9999)
+
+    cat(sprintf("Procrustes M² = %.4f\n", proc$ss))
+    cat(sprintf("Procrustes r  = %.4f\n", sqrt(1 - proc$ss)))
+    cat(sprintf("Protest p     = %.4f  (9999 permutations)\n", prot$signif))
+
+    # Procrustes plot
+    proc_df <- data.frame(
+        orig_x = pcoa_orig[, 1], orig_y = pcoa_orig[, 2],
+        rasp_x = proc$Yrot[, 1], rasp_y = proc$Yrot[, 2],
+        sample  = common_samples
+    )
+
+    p_proc <- ggplot(proc_df) +
+        geom_segment(aes(x = orig_x, y = orig_y, xend = rasp_x, yend = rasp_y),
+                     arrow = arrow(length = unit(0.15, "cm")),
+                     alpha = 0.5, colour = "grey50") +
+        geom_point(aes(x = orig_x, y = orig_y,colour = "Original",shape = "Original"),
+                   size = 2.5, alpha = 0.8) +
+        geom_point(aes(x = rasp_x, y = rasp_y,colour = "RasperGade", shape = "RasperGade"),
+                   size = 2.5, alpha = 0.8) +
+      
+      scale_colour_manual(values = c("Original" = "#00809D","RasperGade" = "#9F1861"),labels = labels) +
+      scale_shape_manual(values = c("Original" = 16,"RasperGade" = 17),labels = labels) +
+      
+      annotate("text", x = min(c(proc_df$orig_x, proc_df$rasp_x)),
+                 y = max(c(proc_df$orig_y, proc_df$rasp_y)),
+                 label = sprintf("M² = %.4f\nr = %.4f\np = %.4f",
+                                 proc$ss, sqrt(1 - proc$ss), prot$signif),
+                 hjust = 0, vjust = 1, size = 3.5) +
+        labs(#title = "Procrustes analysis: Original (●) vs RasperGade (▲)",
+            #subtitle = "Arrows connect the same sample between ordinations",
+             x = "PC1", y = "PC2") +
+   
+        THEME_BASE + theme(legend.position = c(0.7, 0.05),
+                          legend.box = "horizontal",
+                          legend.text = element_text(size=9),
+                          legend.background = element_rect(fill = NA, colour = NA))+
+       guides(shape = guide_legend(title = NULL,override.aes = list(size = 3,color=c("#00809D","#9F1861")),nrow = 1),
+              colour = "none")  
+
+    print(p_proc)
+    save_fig("beta/03_procrustes.pdf", p_proc, w = 7, h = 7)
+
+    # Mantel test
+    mantel_res <- mantel(dist_orig, dist_rasp, method = "pearson", permutations = 9999)
+    cat(sprintf("\nMantel r = %.4f, p = %.4f\n", mantel_res$statistic, mantel_res$signif))
+
+    proc_summary <- tibble(
+        test     = c("Procrustes M²", "Procrustes r", "Protest p",
+                     "Mantel r", "Mantel p"),
+        value    = round(c(proc$ss, sqrt(1 - proc$ss), prot$signif,
+                           mantel_res$statistic, mantel_res$signif), 4),
+        interpretation = c("0 = identical; 1 = unrelated",
+                           "1 = identical ordinations",
+                           "< 0.05 = ordinations differ significantly",
+                           "1 = identical distances",
+                           "< 0.05 = distance matrices differ significantly")
+    )
+
+    proc_summary %>%
+        kbl(caption = "Procrustes + Mantel comparison") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+    save_tbl("03_procrustes_mantel.csv", proc_summary)
+}
+```
+
+## 3.3 PERMANOVA comparison
+
+```{r permanova-table}
+perm_orig <- read_csv_safe(paths$orig_perm)
+perm_rasp <- read_csv_safe(paths$rasp_perm)
+
+normalize_pairs <- function(pair_string) {
+  parts <- str_split(pair_string, " vs ")[[1]]
+  parts_sorted <- sort(parts)
+  paste(parts_sorted, collapse = " vs ")
+}
+
+
+if (!is.null(perm_orig) && !is.null(perm_rasp)) {
+  
+  
+     perm_combined <- full_join(
+        perm_orig %>% 
+          mutate(pairs_norm = sapply(pairs, normalize_pairs)) %>%
+          select(pairs_norm, R2_orig = R2, p_orig = p.value),
+        perm_rasp %>% 
+          mutate(pairs_norm = sapply(pairs, normalize_pairs)) %>%
+          select(pairs_norm, R2_rasp = R2, p_rasp = p.value),
+        by = "pairs_norm"
+      ) %>%
+        rename(pairs = pairs_norm) 
+     
+   perm_combined <- perm_combined %>%
+        mutate(
+            sig_orig    = p_orig < 0.05,
+            sig_rasp    = p_rasp < 0.05,
+            sig_changed = sig_orig != sig_rasp,
+            R2_delta    = R2_rasp - R2_orig
+        )
+
+    perm_combined %>%
+        mutate(across(where(is.numeric), ~ round(.x, 4)),
+               sig_changed = ifelse(sig_changed, "⚠ YES", "No")) %>%
+        kbl(caption = "PERMANOVA R² and p-values: Original vs RasperGade") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+        row_spec(which(perm_combined$sig_changed), bold = TRUE, background = "#FFF3CD")
+
+    save_tbl("03_permanova_comparison.csv", perm_combined)
+    perm_combined <- perm_combined %>%
+      mutate(
+      pairs_new = case_when(
+        pairs == "v6 vs v8" ~ "BL2 vs 2W",
+        pairs == "v6 vs v7" ~ "BL2 vs 1W",
+        pairs == "v2 vs v6" ~ "BL2 vs BL1",
+        pairs == "v7 vs v8" ~ "1W vs 2W",
+        pairs == "v2 vs v8" ~ "BL1 vs 2W",
+        pairs == "v2 vs v7" ~ "BL1 vs 1W",
+        pairs == "v7 vs v8" ~ "1W vs 2W",
+        pairs == "v2 vs v8" ~ "BL1 vs 2W",
+        TRUE ~ pairs   # keep original if unmatched
+      ),
+      sig_stat=case_when(
+        sig_orig & sig_rasp ~ "Both significant",
+        !sig_orig & !sig_rasp ~ "Neither significant",
+        sig_orig & !sig_rasp ~ "Only original",
+        !sig_orig & sig_rasp ~ "Only 16S GCN-corrected",
+        TRUE ~ "Other"
+      )
+    )
+      
+    # R² comparison plot
+    p_r2 <- ggplot(perm_combined, aes(x = R2_orig, y = R2_rasp, label = pairs_new)) +
+        geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+        geom_point(aes(fill = sig_stat), shape=21,size = 3,alpha=0.7,color="black",stroke=0.3) +
+        geom_text_repel(size = 3) +
+        scale_fill_manual(values = c("Both significant" = "#A8D966", 
+                                       "Neither significant" = "#1591DC",
+                                       "Only original"="#D6336C",
+                                       "Only 16S GCN-corrected"="#FF9D23",
+                                       "other"="#BBD5DA"),
+                            name = "") +
+        labs(#title = "PERMANOVA R² comparison",
+             x = "R² - Original", y = "R² - 16S GCN-corrected") +
+        THEME_BASE + theme(legend.position = c(0.23, 0.9),
+                          legend.text = element_text(size=9),
+                          legend.background = element_rect(fill = NA, colour = NA))+
+       guides(fill = guide_legend(title = NULL,override.aes = list(size = 3),ncol = 1))  
+
+    print(p_r2)
+    save_fig("beta/03_permanova_r2.pdf", p_r2, w = 7, h = 6)
+}
+```
+
+```{r}
+p_pcoa <- (p_pcoa_orig + p_pcoa_rasp) + plot_layout(guides = "collect") &
+        theme(legend.position = "top")
+p_beta_combined <-  p_pcoa / (p_r2 + p_proc) + plot_annotation(tag_levels = "A")
+save_fig("beta/03_beta-div_combined.pdf", p_beta_combined, w = 10, h = 10)
+```
+
+---
+
+# 4  Differential Abundance Comparison
+
+```{r load-da}
+# ── Load all LinDA results ─────────────────────────────────────────────────────
+levels <- c("ASV", "Genus", "Family", "Order", "Class", "Phylum")
+
+da_paths <- list(
+    ASV    = list(orig = paths$orig_linDA_asv,    rasp = paths$rasp_linDA_asv),
+    Genus  = list(orig = paths$orig_linDA_genus,  rasp = paths$rasp_linDA_genus),
+    Family = list(orig = paths$orig_linDA_family, rasp = paths$rasp_linDA_family),
+    Order  = list(orig = paths$orig_linDA_order,  rasp = paths$rasp_linDA_order),
+    Class  = list(orig = paths$orig_linDA_class,  rasp = paths$rasp_linDA_class),
+    Phylum = list(orig = paths$orig_linDA_phylum, rasp = paths$rasp_linDA_phylum)
+)
+
+load_da <- function(path, branch, level) {
+    df <- read_csv_safe(path)
+    if (is.null(df)) return(NULL)
+    df %>% mutate(branch = branch, level = level)
+}
+
+da_all <- map_dfr(levels, function(lv) {
+    bind_rows(
+        load_da(da_paths[[lv]]$orig, "Original",   lv),
+        load_da(da_paths[[lv]]$rasp, "RasperGade", lv)
+    )
+})
+
+if (nrow(da_all) > 0) {
+    cat("Differential abundance data loaded.\n")
+    cat("Levels available:", paste(unique(da_all$level), collapse = ", "), "\n")
+    cat("Branches available:", paste(unique(da_all$branch), collapse = ", "), "\n")
+}
+```
+
+## 4.1 Number of significant taxa per level
+
+```{r da-counts, fig.width=10, fig.height=5}
+if (nrow(da_all) > 0) {
+    da_counts <- da_all %>%
+        group_by(level, branch, visit) %>%
+        summarise(n_sig = n(), .groups = "drop") %>%
+        mutate(level = factor(level, levels = levels))
+
+    p_da_counts <- ggplot(da_counts, aes(x = level, y = n_sig, fill = branch)) +
+        geom_col(position = position_dodge(0.75), width = 0.7) +
+        scale_fill_manual(values = PAL_BRANCH) +
+        facet_wrap(~visit) +
+        labs(title = "Number of significant taxa per level and visit",
+             x = "Taxonomic level", y = "Significant taxa (|LFC| > 1, padj < 0.05)",
+             fill = "Branch") +
+        THEME_BASE
+
+    print(p_da_counts)
+    save_fig("da/04_sig_taxa_counts.pdf", p_da_counts, w = 12, h = 5)
+
+    da_counts_wide <- da_counts %>%
+        pivot_wider(names_from = branch, values_from = n_sig, values_fill = 0) %>%
+        mutate(delta = RasperGade - Original)
+
+    da_counts_wide %>%
+        kbl(caption = "Significant taxa count: Original vs RasperGade") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+    save_tbl("04_sig_taxa_counts.csv", da_counts_wide)
+}
+```
+
+## 4.2 LFC correlation between branches
+
+```{r lfc-correlation, fig.width=14, fig.height=10}
+if (nrow(da_all) > 0) {
+    # Join by taxa + visit
+    taxa_col <- if ("taxa" %in% colnames(da_all)) "taxa" else "Taxon"
+
+    da_wide <- da_all %>%
+        select(all_of(taxa_col), visit, branch, level, log2FoldChange, padj) %>%
+        pivot_wider(
+            names_from  = branch,
+            values_from = c(log2FoldChange, padj),
+            names_glue  = "{.value}_{branch}"
+        )
+
+    p_lfc_cor <- ggplot(da_wide,
+                        aes(x = log2FoldChange_Original,
+                            y = log2FoldChange_RasperGade)) +
+        geom_hline(yintercept = 0, linetype = "dashed", colour = "grey70") +
+        geom_vline(xintercept = 0, linetype = "dashed", colour = "grey70") +
+        geom_abline(slope = 1, intercept = 0, colour = "grey50", linetype = "dotted") +
+        geom_point(alpha = 0.5, size = 1.8, colour = "#2166AC") +
+        facet_grid(visit ~ level) +
+        labs(title = "Log2 fold change correlation: Original vs RasperGade",
+             x = "LFC — Original", y = "LFC — RasperGade") +
+        THEME_BASE
+
+    print(p_lfc_cor)
+    save_fig("da/04_lfc_correlation.pdf", p_lfc_cor, w = 14, h = 10)
+
+    # Correlation stats per level
+    lfc_cor_stats <- da_wide %>%
+        group_by(level) %>%
+        summarise(
+            n        = n(),
+            pearson  = cor(log2FoldChange_Original, log2FoldChange_RasperGade,
+                           use = "complete.obs", method = "pearson"),
+            spearman = cor(log2FoldChange_Original, log2FoldChange_RasperGade,
+                           use = "complete.obs", method = "spearman"),
+            .groups  = "drop"
+        ) %>%
+        mutate(across(c(pearson, spearman), ~ round(.x, 4)))
+
+    lfc_cor_stats %>%
+        kbl(caption = "LFC Pearson and Spearman correlation per taxonomic level") %>%
+        kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+    save_tbl("04_lfc_correlation.csv", lfc_cor_stats)
+}
+```
+
+## 4.3 Overlap between significant taxa (UpSet plot)
+
+```{r upset-plots, fig.width=10, fig.height=6}
+if (nrow(da_all) > 0) {
+    taxa_col <- if ("taxa" %in% colnames(da_all)) "taxa" else "Taxon"
+
+    make_upset <- function(da_df, level_filter, title_sfx) {
+        df_filt <- da_df %>%
+            filter(level == level_filter)
+
+        if (nrow(df_filt) == 0) return(invisible(NULL))
+
+        taxa_orig <- unique(df_filt$taxa[df_filt$branch == "Original"])
+        taxa_rasp <- unique(df_filt$taxa[df_filt$branch == "RasperGade"])
+
+        upset_list <- list(
+            Original   = taxa_orig,
+            RasperGade = taxa_rasp
+        )
+
+        shared    <- length(intersect(taxa_orig, taxa_rasp))
+        only_orig <- length(setdiff(taxa_orig, taxa_rasp))
+        only_rasp <- length(setdiff(taxa_rasp, taxa_orig))
+
+        cat(sprintf("%s — Shared: %d | Only Original: %d | Only RasperGade: %d\n",
+                    level_filter, shared, only_orig, only_rasp))
+
+        upset(fromList(upset_list),
+              sets.bar.color  = unname(PAL_BRANCH),
+              main.bar.color  = "grey30",
+              text.scale      = 1.3,
+              order.by        = "freq")
+
+        title(main = sprintf("Overlap of significant %s — %s", level_filter, title_sfx),
+              line = 2.5)
+
+        tibble(level = level_filter,
+               shared = shared, only_original = only_orig, only_raspergade = only_rasp,
+               jaccard = shared / (shared + only_orig + only_rasp))
+    }
+
+    overlap_summary <- map_dfr(levels, function(lv) {
+        tryCatch({
+            png(file.path("figures/da", sprintf("04_upset_%s.png", tolower(lv))),
+                width = 900, height = 600, res = 100)
+            res <- make_upset(da_all, lv, "Original vs RasperGade")
+            dev.off()
+            res
+        }, error = function(e) {
+            dev.off()
+            NULL
+        })
+    })
+
+    if (!is.null(overlap_summary) && nrow(overlap_summary) > 0) {
+        overlap_summary %>%
+            mutate(jaccard = round(jaccard, 3)) %>%
+            kbl(caption = "Overlap of significant taxa: Original vs RasperGade") %>%
+            kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+        save_tbl("04_overlap_summary.csv", overlap_summary)
+    }
+}
+```
+
+## 4.4 Taxa gained and lost after correction
+
+```{r gained-lost}
+if (nrow(da_all) > 0) {
+    taxa_col <- if ("taxa" %in% colnames(da_all)) "taxa" else "Taxon"
+
+    gained_lost <- map_dfr(levels, function(lv) {
+        df_lv     <- da_all %>% filter(level == lv)
+        orig_taxa <- unique(df_lv[[taxa_col]][df_lv$branch == "Original"])
+        rasp_taxa <- unique(df_lv[[taxa_col]][df_lv$branch == "RasperGade"])
+
+        bind_rows(
+            tibble(level = lv, status = "Only in Original",
+                   taxa = setdiff(orig_taxa, rasp_taxa)),
+            tibble(level = lv, status = "Only in RasperGade",
+                   taxa = setdiff(rasp_taxa, orig_taxa))
+        )
+    })
+
+    if (nrow(gained_lost) > 0) {
+        gained_lost %>%
+            group_by(level, status) %>%
+            summarise(n = n(), .groups = "drop") %>%
+            pivot_wider(names_from = status, values_from = n, values_fill = 0) %>%
+            kbl(caption = "Taxa gained/lost at each taxonomic level") %>%
+            kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+        save_tbl("04_taxa_gained_lost.csv", gained_lost)
+    }
+}
+```
+
+## 4.5 Heatmap of shared significant taxa (Genus level)
+
+```{r da-heatmap, fig.width=12, fig.height=8}
+if (nrow(da_all) > 0) {
+    da_genus <- da_all %>% filter(level == "Genus")
+
+    if (nrow(da_genus) > 0) {
+        taxa_col <- if ("taxa" %in% colnames(da_genus)) "taxa" else "Taxon"
+
+        shared_genera <- intersect(
+            unique(da_genus[[taxa_col]][da_genus$branch == "Original"]),
+            unique(da_genus[[taxa_col]][da_genus$branch == "RasperGade"])
+        )
+
+        if (length(shared_genera) > 0) {
+            heat_df <- da_genus %>%
+                filter(.data[[taxa_col]] %in% shared_genera) %>%
+                mutate(label = paste(visit, branch, sep = " | ")) %>%
+                select(all_of(taxa_col), label, log2FoldChange) %>%
+                pivot_wider(names_from = label, values_from = log2FoldChange) %>%
+                column_to_rownames(taxa_col)
+
+            lfc_range <- max(abs(heat_df), na.rm = TRUE)
+            
+            heat_mat <- as.matrix(heat_df)
+            heat_mat[is.na(heat_mat)] <- 0
+            
+            pheatmap(
+                heat_mat,
+                color    = colorRampPalette(c("#2166AC", "white", "#D6604D"))(51),
+                breaks   = seq(-lfc_range, lfc_range, length.out = 52),
+                cluster_rows = TRUE,
+                cluster_cols = FALSE,
+                main     = "LFC of shared significant genera: Original vs RasperGade",
+                fontsize = 9,
+                filename = file.path(ANALYSIS_DIR,"figures/da/04_heatmap_genus.pdf"),
+                width    = 12, height = 8
+            )
+
+            pheatmap(
+                heat_mat,
+                color    = colorRampPalette(c("#2166AC", "white", "#D6604D"))(51),
+                breaks   = seq(-lfc_range, lfc_range, length.out = 52),
+                cluster_rows = TRUE,
+                cluster_cols = FALSE,
+                main     = "LFC of shared significant genera: Original vs RasperGade",
+                fontsize = 9
+            )
+        }
+    }
+}
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
