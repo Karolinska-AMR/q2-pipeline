@@ -1,0 +1,602 @@
+---
+title: "Per-Genus Sensitivity Analysis for EP395"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = T,
+  message = T
+)
+```
+
+# Per-Genus Sensitivity Analysis
+
+---
+
+# 1. Setup & Load Data
+
+```{r load-data}
+rm(list=ls())
+
+library(tidyverse)
+library(metagenomeSeq)
+library(MicrobiomeStat)
+library(furrr)
+library(ggrepel)
+
+set.seed(2024)
+
+# ────────────────────────────────────────────────────────────────────────────
+# FILE PATHS — Update these to match your directory structure
+# ────────────────────────────────────────────────────────────────────────────
+
+LINDA_PATH       <- "../EP395/artifact/linDA_Genus_raw.csv"
+PROCESSED_DATA   <- "../EP395/export/ep395_processed_counts.RData"
+BASELINE_TP      <- "Baseline 1"
+
+# ────────────────────────────────────────────────────────────────────────────
+# LOAD DATA
+# ────────────────────────────────────────────────────────────────────────────
+
+# Load linDA results
+ep395_linda <- read_csv(LINDA_PATH, show_col_types = FALSE) %>%
+  rename_with(~ case_when(
+    . %in% c("log2FoldChange", "log2fc") ~ "log2FC",
+    . %in% c("std_error", "stderr", "SE") ~ "lfcSE",
+    . %in% c("taxa") ~ "genus",
+    TRUE ~ .
+  )) %>%
+  mutate(significant = padj < 0.05)
+
+# Load normalized counts and metadata
+load(PROCESSED_DATA)
+
+# Extract baseline mean abundance per genus
+bl_samples <- ep395_meta %>%
+  rownames_to_column("sample_id") %>%
+  filter(timepoint == BASELINE_TP) %>%
+  pull(sample_id)
+
+bl_counts <- ep395_counts_norm[bl_samples, ]
+mean_abund_per_genus <- colMeans(bl_counts / rowSums(bl_counts))
+
+# ────────────────────────────────────────────────────────────────────────────
+# SUMMARY
+# ────────────────────────────────────────────────────────────────────────────
+
+cat(sprintf("═════════════════════════════════════════════════════════\n"))
+cat(sprintf("Per-Genus Sensitivity Analysis for EP395\n"))
+cat(sprintf("═════════════════════════════════════════════════════════\n\n"))
+cat(sprintf("Total genera detected:      %d\n", length(mean_abund_per_genus)))
+cat(sprintf("Significant DA genera:      %d\n", sum(ep395_linda$significant, na.rm = TRUE)))
+cat(sprintf("Baseline samples:           %d\n\n", nrow(bl_counts)))
+```
+
+---
+
+# 2. Per-Genus Simulation Function
+
+```{r sim-function}
+simulate_power_for_genus <- function(
+    n_subj,
+    true_fc,
+    genus_abund,
+    baseline_genus_counts,
+    depth = 50000L,
+    n_sim = 100,
+    alpha_fdr = 0.05,
+    seed = NULL,
+    ...
+) {
+  if (!is.null(seed)) set.seed(seed)
+  
+
+  baseline_genus_counts <- as.matrix(baseline_genus_counts)
+  
+  # Remove empty genera, just in case
+  baseline_genus_counts <- baseline_genus_counts[
+    rowSums(baseline_genus_counts, na.rm = TRUE) > 0,
+    ,
+    drop = FALSE
+  ]
+  
+  # Number of genera tested after filtering: this sets the FDR burden
+  n_taxa <- nrow(baseline_genus_counts)
+  
+  if (n_taxa < 2) {
+    stop("baseline_genus_counts must contain at least two genera.")
+  }
+  
+  # Convert baseline table to relative abundance per sample
+  sample_sums <- colSums(baseline_genus_counts, na.rm = TRUE)
+  keep_samples <- sample_sums > 0
+  
+  baseline_genus_counts <- baseline_genus_counts[, keep_samples, drop = FALSE]
+  sample_sums <- sample_sums[keep_samples]
+  
+  baseline_rel <- sweep(
+    baseline_genus_counts,
+    2,
+    sample_sums,
+    FUN = "/"
+  )
+  
+  # Mean relative abundance per genus across baseline samples
+  mean_genus_abund <- rowMeans(baseline_rel, na.rm = TRUE)
+  mean_genus_abund <- mean_genus_abund[
+    is.finite(mean_genus_abund) & mean_genus_abund > 0
+  ]
+  
+  if (length(mean_genus_abund) == 0) {
+    stop("No positive genus relative abundances found.")
+  }
+  
+  if (genus_abund <= 0 || genus_abund >= 1) {
+    stop("genus_abund must be a relative abundance between 0 and 1.")
+  }
+  
+  n_background <- n_taxa - 1
+  p_abx_preview <- min(genus_abund * true_fc, 0.99)
+
+  power_vec <- replicate(n_sim, {
+    
+    # -----------------------------
+    # STEP 1: Build synthetic count matrix
+    # -----------------------------
+    n_samples <- n_subj * 2
+    
+    counts <- matrix(
+      0L,
+      nrow = n_taxa,
+      ncol = n_samples
+    )
+    
+    rownames(counts) <- paste0("Genus", seq_len(n_taxa))
+    colnames(counts) <- paste0("Sample", seq_len(n_samples))
+    
+    # -----------------------------
+    # STEP 2: Create paired metadata
+    # -----------------------------
+    meta_sim <- data.frame(
+      sample_id  = colnames(counts),
+      subject_id = factor(rep(paste0("Subj", seq_len(n_subj)), times = 2)),
+      timepoint  = factor(
+        rep(c("BL", "ABX"), each = n_subj),
+        levels = c("BL", "ABX")
+      ),
+      stringsAsFactors = FALSE
+    )
+    
+    rownames(meta_sim) <- meta_sim$sample_id
+    
+    bl_idx  <- which(meta_sim$timepoint == "BL")
+    abx_idx <- which(meta_sim$timepoint == "ABX")
+    
+    # -----------------------------
+    # STEP 3: Simulate target genus
+    # -----------------------------
+    # Genus1 is the true changed genus.
+    p_bl  <- genus_abund
+    p_abx <- min(p_bl * true_fc, 0.99)
+    
+    counts[1, bl_idx] <- rbinom(
+      n = n_subj,
+      size = depth,
+      prob = p_bl
+    )
+    
+    counts[1, abx_idx] <- rbinom(
+      n = n_subj,
+      size = depth,
+      prob = p_abx
+    )
+    
+    # -----------------------------
+    # STEP 4: Simulate background genera
+    # -----------------------------
+    # Background genera are sampled from the observed EP395 baseline
+    # abundance distribution and are unchanged between BL and ABX.
+    
+    background_abund <- sample(
+      mean_genus_abund,
+      size = n_taxa - 1,
+      replace = TRUE
+    )
+    
+    for (i in 2:n_taxa) {
+      p_i <- min(background_abund[i - 1], 0.99)
+      
+      counts[i, ] <- rbinom(
+        n = n_samples,
+        size = depth,
+        prob = p_i
+      )
+    }
+    
+    # Add pseudocount to avoid zeros
+    counts <- counts + 1L
+    
+    # -----------------------------
+    # STEP 5: Run LinDA
+    # -----------------------------
+    res <- tryCatch(
+      {
+           LinDA::linda(
+              otu.tab = counts,       # taxa × samples
+              meta    = meta_sim,     # samples × variables
+              formula = "~ timepoint + (1 | subject_id)",
+              alpha      = alpha_fdr,
+              prev.cut   = 0,         # no prevalence filter in simulation
+              lib.cut    = 1,         # no library size filter
+              winsor.quan = 0.97      # standard winsorization
+              # NO ... here — no extra params
+            )
+
+      },
+      error = function(e) {
+        message("LinDA error: ", e$message)
+        return(NULL)
+      }
+    )
+    
+    if (is.null(res)) return(NA_real_)
+    
+    # -----------------------------
+    # STEP 6: Extract adjusted p-value for target genus
+    # -----------------------------
+    p_adj <- tryCatch(
+      {
+        res$output[["timepointABX"]]["Genus1", "padj"]
+      },
+      error = function(e) NA_real_
+    )
+    
+    if (is.na(p_adj)) return(NA_real_)
+    
+    # -----------------------------
+    # STEP 7: Detection yes/no
+    # -----------------------------
+    as.numeric(p_adj < alpha_fdr)
+  })
+  
+  # Power = proportion of simulations where target genus was detected
+  mean(power_vec, na.rm = TRUE)
+  
+}
+```
+
+---
+
+# 3. Per-Genus Simulation (Parallel Optimized)
+
+```{r per-genus-sim-parallel, cache=TRUE}
+# ────────────────────────────────────────────────────────────────────────────
+# PRE-CALCULATE ONCE (not per genus)
+# ────────────────────────────────────────────────────────────────────────────
+
+# Actual sample depths from EP395 baseline
+real_sample_depths <- rowSums(ep395_counts_norm)   # per-sample depth
+n_taxa_total <- nrow(ep395_counts_norm)            # number of genera
+
+# Baseline relative abundance distribution per genus
+baseline_rel_abund <- rowMeans(
+  ep395_counts_norm / colSums(ep395_counts_norm)
+)
+
+# Total number of genera in baseline
+n_taxa_total <- ncol(ep395_counts_norm)
+
+cat(sprintf("Depth statistics from EP395 baseline:\n"))
+cat(sprintf("  Min depth:    %.0f reads\n", min(real_sample_depths)))
+cat(sprintf("  Median depth: %.0f reads\n", median(real_sample_depths)))
+cat(sprintf("  Max depth:    %.0f reads\n", max(real_sample_depths)))
+cat(sprintf("  Total genera: %d\n\n", n_taxa_total))
+
+
+# Filter by minimum abundance (remove extremely rare genera)
+MIN_ABUNDANCE <- 0.001  # 0.1% mean relative abundance threshold
+
+all_genera <- ep395_linda %>% filter(visit == "v7") %>%
+  pull(genus) %>%
+  unique() %>%
+  sort() %>%
+  # Keep only genera above abundance threshold
+  {.[. %in% names(mean_abund_per_genus[mean_abund_per_genus >= MIN_ABUNDANCE])]}
+
+n_below_threshold <- length(setdiff(
+  ep395_linda %>% pull(genus) %>% unique(),
+  all_genera
+))
+
+cat(sprintf("Running sensitivity simulations...\n"))
+cat(sprintf("  Genera tested: %d\n", length(all_genera)))
+cat(sprintf("  Excluded (< %.4f%% abundance): %d\n", MIN_ABUNDANCE*100, n_below_threshold))
+
+
+
+# Setup parallel backend
+plan(multisession, workers = parallel::detectCores() - 5)
+
+n_genera_total <- length(all_genera)
+start_time <- Sys.time()
+
+cat(sprintf("\n"))
+cat(sprintf("╔═══════════════════════════════════════════════════════════════════╗\n"))
+cat(sprintf("║ Per-Genus Sensitivity Simulation\n"))
+cat(sprintf("║ Parameters: n_sim=30 | depth=20k | FC_grid=5 | Cores=20\n"))
+cat(sprintf("║ Total genera to process: %d\n", n_genera_total))
+cat(sprintf("║ Estimated time: 2-3 hours\n"))
+cat(sprintf("╚═══════════════════════════════════════════════════════════════════╝\n\n"))
+
+# Fold-change grid to test
+fc_grid <- c(1.5, 2.0, 3.0, 5.0, 10.0)
+
+# Per-genus sensitivity analysis (parallelized across genera)
+per_genus_results <- future_map_dfr(all_genera, function(g) {
+
+  
+      # Calculate progress
+    genus_idx <- which(all_genera == g)
+    elapsed_secs <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+    elapsed_mins <- elapsed_secs / 60
+    
+    # Estimate remaining time
+    if (genus_idx > 1) {
+      rate_per_genus <- elapsed_secs / (genus_idx - 1)  # seconds per genus
+      remaining_genera <- n_genera_total - genus_idx
+      est_remaining_secs <- remaining_genera * rate_per_genus
+      est_remaining_mins <- est_remaining_secs / 60
+    } else {
+      est_remaining_mins <- NA
+    }
+    
+    # Print progress
+    pct_complete <- 100 * genus_idx / n_genera_total
+    status_bar <- paste0(
+      "[",
+      paste0(rep("=", round(pct_complete / 5)), collapse = ""),
+      paste0(rep(" ", 20 - round(pct_complete / 5)), collapse = ""),
+      "]"
+    )
+
+    
+  # Get genus abundance from baseline
+  if (!g %in% names(mean_abund_per_genus)) {
+    return(NULL)
+  }
+
+  genus_mean_abund <- mean_abund_per_genus[g]
+  # Get actual linDA result for this genus
+ actual_result <- ep395_linda %>% 
+  dplyr::filter(.data$genus == g)
+ 
+  if (nrow(actual_result) == 0) return(NULL)
+
+  # Simulate power across fold-change grid
+  # Simulate power across fold-change grid
+  power_curve <- map_dbl(
+    fc_grid,
+    ~ simulate_power_for_genus(
+      n_subj                = 15,
+      true_fc               = .x,
+      genus_abund           = genus_mean_abund,
+      baseline_genus_counts = t(ep395_counts_norm),
+      depth = 50000L,
+      n_sim                 = 50,
+      alpha_fdr             = 0.05
+      )
+  )
+
+    # Find MDFC (fold-change where power crosses 80%)
+  mdfc <- NA_real_
+  if (any(power_curve >= 0.80, na.rm = TRUE)) {
+    idx <- min(which(power_curve >= 0.80))
+    mdfc <- fc_grid[idx]
+  }
+
+  # Calculate post-hoc power for actual detected effect
+  actual_fc <- 2 ^ abs(actual_result$log2FC[1])
+  actual_power <- simulate_power_for_genus(
+    n_subj      = 15,
+    true_fc     = actual_fc,
+      genus_abund           = genus_mean_abund,
+      baseline_genus_counts = t(ep395_counts_norm),
+      depth = 50000L,
+      n_sim                 = 50,
+      alpha_fdr             = 0.05
+  )
+
+  # Return results
+  tibble(
+    genus             = g,
+    baseline_abund    = round(genus_mean_abund, 5),
+    detected_log2FC   = round(actual_result$log2FC[1], 2),
+    detected_FC       = round(actual_fc, 2),
+    detected_padj     = round(actual_result$padj[1], 4),
+    mdfc_80pct        = ifelse(is.na(mdfc), ">10", round(mdfc, 2)),
+    post_hoc_power    = round(actual_power, 2),
+    power_category    = case_when(
+      actual_power >= 0.80 ~ "Well-powered (≥80%)",
+      actual_power >= 0.60 ~ "Adequately powered (60-80%)",
+      actual_power >= 0.40 ~ "Moderately powered (40-60%)",
+      TRUE ~ "Under-powered (<40%)"
+    )
+  )
+},
+  .progress = TRUE,
+  .options = furrr_options(
+     packages = c("dplyr", "purrr", "tibble", "rlang"),
+    globals = c(
+      "mean_abund_per_genus",
+      "ep395_linda",
+      "ep395_counts_norm",
+      "fc_grid",
+      "simulate_power_for_genus",
+      "all_genera","start_time","n_genera_total"
+    )
+  )
+)
+
+# Reset parallel plan
+plan(sequential)
+
+# Sort by power category and abundance
+per_genus_results <- per_genus_results %>%
+  mutate(power_category = factor(power_category,
+                                 levels = c("Well-powered (≥80%)",
+                                           "Adequately powered (60-80%)",
+                                           "Moderately powered (40-60%)",
+                                           "Under-powered (<40%)"))) %>%
+  arrange(power_category, desc(baseline_abund))
+
+write_tsv(per_genus_results, "../compare_diversities/analysis/tables/per_genus_sensitivity.tsv")
+
+# Final summary
+total_time <- difftime(Sys.time(), start_time, units = "mins")
+cat(sprintf("\n"))
+cat(sprintf("╔═══════════════════════════════════════════════════════════════════╗\n"))
+cat(sprintf("║ COMPLETE!\n"))
+cat(sprintf("║ Total time: %.1f minutes\n", as.numeric(total_time)))
+cat(sprintf("║ Genera processed: %d\n", nrow(per_genus_results)))
+cat(sprintf("╚═══════════════════════════════════════════════════════════════════╝\n\n"))
+
+```
+
+---
+
+# 4. Results Table
+
+```{r results-table}
+knitr::kable(
+  per_genus_results %>%
+    select(Genus = genus,
+           "Baseline\nAbundance" = baseline_abund,
+           "Detected\nLog₂FC" = detected_log2FC,
+           "Detected\nFold-Change" = detected_FC,
+           "FDR p-value" = detected_padj,
+           "MDFC\n(80% power)" = mdfc_80pct,
+           "Post-hoc\nPower" = post_hoc_power,
+           "Power\nCategory" = power_category),
+  caption = "Per-genus sensitivity analysis: detected effects vs. 80% power threshold"
+)
+
+write_tsv(per_genus_results, "../compare_diversities/analysis/tables/per_genus_sensitivity.tsv")
+```
+
+
+```{r}
+# Diagnostic: which genera were lost?
+sig_genera_input <- ep395_linda %>%
+  filter(significant) %>%
+  pull(genus) %>%
+  unique()
+
+sig_genera_output <- per_genus_results %>% pull(genus) %>% unique()
+
+lost_genera <- setdiff(sig_genera_input, sig_genera_output)
+
+cat(sprintf("═════════════════════════════════════════════════════════\n"))
+cat(sprintf("DIAGNOSTIC: Genera filtering\n"))
+cat(sprintf("═════════════════════════════════════════════════════════\n\n"))
+cat(sprintf("Input (significant in linDA):   %d genera\n", length(sig_genera_input)))
+cat(sprintf("Output (completed sim):         %d genera\n", length(sig_genera_output)))
+cat(sprintf("Lost during simulation:         %d genera\n\n", length(lost_genera)))
+
+if (length(lost_genera) > 0) {
+  cat(sprintf("Genera that failed simulation:\n"))
+  print(lost_genera)
+  
+  cat(sprintf("\nPossible causes:\n"))
+  cat(sprintf("1. Genus not found in mean_abund_per_genus vector\n"))
+  cat(sprintf("2. Multiple rows per genus (visit/timepoint issue)\n"))
+  cat(sprintf("3. LinDA simulation crashed for that genus\n\n"))
+  
+  # Check which are in abundance data
+  cat(sprintf("Checking if lost genera are in abundance data:\n"))
+  in_abund <- lost_genera %in% names(mean_abund_per_genus)
+  cat(sprintf("  In abundance data: %d / %d\n", sum(in_abund), length(lost_genera)))
+  cat(sprintf("  Missing from abundance: %s\n", 
+              paste(lost_genera[!in_abund], collapse = ", ")))
+}
+```
+
+---
+
+# 5. Visualization: Power vs Detected Effect Size
+
+```{r viz-power}
+per_genus_results <- read_tsv("../compare_diversities/analysis/tables/sensitivity_90000_200/per_genus_sensitivity_90000_200.tsv")
+
+viz_df <- per_genus_results %>%
+  mutate(genus_label = paste0(genus, "\n(abund=", baseline_abund, ")"),
+         sig = (detected_padj<0.05) & (abs(detected_log2FC)>1))
+
+p_power <- ggplot(viz_df, aes(x = detected_log2FC, y = post_hoc_power)) +
+  geom_point(aes(fill = sig, size = baseline_abund, shape = power_category),
+             alpha = 0.5, color = "black", stroke = 0.3) +
+  geom_hline(yintercept = 0.80, linetype = "dashed", colour = "grey40",
+             linewidth = 0.5) +
+  geom_vline(xintercept = c(-1,1), linetype = "dashed", colour = "grey40",
+             linewidth = 0.4) +
+  annotate("text", x = c(-1.1,1.1), y = 0.3,angle = 90,
+           label = c("LFC = -1","LFC = 1"), size = 3.2, hjust = 0, colour = "grey40") +
+  annotate("text", x = min(viz_df$detected_log2FC), y = 0.82,
+           label = "80% power threshold", size = 3.2, hjust = 0, colour = "grey40") +
+  geom_label_repel(aes(label = genus, color = sig), 
+                   size = 2.8, box.padding = 0.3, alpha = 0.7,
+                   force = 2, max.overlaps = 25, 
+                   min.segment.length = 0, max.time = 10, max.iter = 1e5) +
+  scale_x_continuous(limits = c(min(viz_df$detected_log2FC), max(viz_df$detected_log2FC) + 0.5)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_shape_manual(
+    values = c("Well-powered (≥80%)" = 21,
+               "Adequately powered (60-80%)" = 22,
+               "Moderately powered (40-60%)" = 23,
+               "Under-powered (<40%)" = 25),
+    name = "Power Category"
+  ) +
+  scale_fill_manual(
+    values = c("TRUE" = "#2ecc71", "FALSE" = "#95a5a6"),
+    labels = c("TRUE" = "Significant", "FALSE" = "Not significant"),
+    name = "Significance"
+  ) +
+  scale_colour_manual(
+    values = c("TRUE" = "#2ecc71", "FALSE" = "#95a5a6"),
+    labels = c("TRUE" = "Significant", "FALSE" = "Not significant"),
+    name = "Significance"
+  ) +
+  scale_size_continuous(name = "Baseline rel. abundance", range = c(2, 8)) +
+  labs(x = "Detected log fold-change",
+       y = "Post-hoc statistical power") +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "right",
+        #legend.box = "horizontal",
+        legend.box.just = "left",
+        legend.spacing.y = unit(-0.2, "cm"),
+        legend.text = element_text(size = 8),       
+        legend.title = element_text(size = 8, face = "bold")) +
+  guides(
+    fill = guide_legend(override.aes = list(size = 4, stroke = 0.5, shape = 21), ncol = 1),
+    size = guide_legend(override.aes = list(fill = "grey50", color = "black", stroke = 0.5, shape = 21), ncol = 1),
+    color = "none",
+    shape = guide_legend(override.aes = list(fill = "grey50", size = 3, color = "black", stroke = 0.5), ncol = 1)
+  )
+
+p_power
+ggsave("../compare_diversities/analysis/figures/per_genus_power.pdf",
+       p_power, width = 12, height = 9)
+```
+
+---
+
+# Session Info
+
+```{r session}
+sessionInfo()
+```

@@ -1,0 +1,1187 @@
+---
+title: "Cross-Study Microbiome Perturbation Comparison"
+subtitle: "EP395 vs Conventional Antibiotic Studies — Sensitivity & Effect-Size Benchmarking"
+author: "Microbiome Analysis Pipeline"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    number_sections: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(
+#   echo       = TRUE,
+#   warning    = FALSE,
+#   message    = FALSE,
+#   fig.width  = 10,
+#   fig.height = 6,
+#   dpi        = 150,
+#   out.width  = "100%"
+# )
+rm(list = ls())
+# ── Core packages ──────────────────────────────────────────────────────────────
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(lme4)
+  library(lmerTest)
+  library(emmeans)
+  library(performance)   # r2_nakagawa()
+  library(vegan)
+  library(broom)
+  library(broom.mixed)
+  library(ggplot2)
+  library(patchwork)
+  library(readr)
+  library(purrr)
+  library(scales)
+  library(knitr)
+  library(kableExtra)
+  library(effectsize)    # cohens_d, eta_squared
+  library(pheatmap)
+  library(ape)           # pcoa()
+  library(ggrepel)
+})
+```
+
+```{r path-setup, include=FALSE}
+root_dir <- "../compare_diversities/"
+tbl_dir <- file.path(root_dir,"analysis/tables")
+fig_dir <- file.path(root_dir,"analysis/figures")
+# ── Output directories ────────────────────────────────────────────────────────
+dir.create(fig_dir, showWarnings = FALSE,recursive = T)
+dir.create(tbl_dir,  showWarnings = FALSE,recursive = T)
+
+# ── Global ggplot theme ───────────────────────────────────────────────────────
+theme_mb <- function(base_size = 11) {
+  theme_bw(base_size = base_size) %+replace%
+    theme(
+      strip.background = element_rect(fill = "grey92", colour = NA),
+      strip.text       = element_text(face = "bold", size = base_size - 1),
+      axis.text        = element_text(colour = "grey30"),
+      legend.position  = "right",
+      plot.title       = element_text(face = "bold", size = base_size + 1),
+      plot.subtitle    = element_text(colour = "grey40", size = base_size - 1),
+      panel.grid = element_blank()
+    )
+}
+theme_set(theme_mb())
+
+# Study-group colour palette (extend as needed)
+GROUP_COLOURS <- c(
+  "Glasmacinal"             = "#1f77b4",  
+  "Tebipenem"               = "#ff7f0e",  
+  "Amoxicillin_clavulanate" = "#2ca02c",  
+  "Mer+Gen+Van"             = "#d62728", 
+  "Azithromycin"            = "#9467bd",  
+  "Erythromycin"            = "#8c564b" 
+)
+
+study_groups_levels <- c(
+  "Glasmacinal",
+  "Azithromycin",
+  "Erythromycin",
+  "Amoxicillin_clavulanate",
+  "Tebipenem",
+  "Mer+Gen+Van"
+ 
+)
+
+METRIC_COLOURS <- c("observed"="#C295D8", "shannon"="#2C786C","simpson"="#2F2FE4",
+                    "evenness_pielou"="#CF0F0F","Faiths_PD"="#FFD271")
+METRIC_SHAPES <- c("observed"=21, "shannon"=22,"simpson"=23,
+                    "evenness_pielou"=24,"Faiths_PD"=25)
+METRIC_LABELS <- c("observed" = "Observed Richness",
+                   "shannon" = "Shannon Diversity",
+                   "simpson" = "Simpson Diversity",
+                   "evenness_pielou" = "Pielou's Evenness",
+                   "Faiths_PD" = "Faith's PD")
+```
+
+---
+
+# ① Study Configuration
+
+```{r study-config}
+# ══════════════════════════════════════════════════════════════════════════════
+#   USER-EDITABLE CONFIGURATION
+# ══════════════════════════════════════════════════════════════════════════════
+study_config <- tibble::tribble(
+  ~study_name,  ~study_folder,    ~baseline_timepoint,  ~group,~sdir,
+  "EP395",  "studies/EP395","Baseline 1","Glasmacinal",root_dir,
+  "Tebipenem", "studies/Tebipenem","Day001","Tebipenem",root_dir,
+  "Amoxicillin_clavulanate","studies/Amoxi","Day001","Amoxicillin_clavulanate",root_dir,
+ "MER-GEN-VAN","studies/Palleja_et_al","Dag0","Mer+Gen+Van",root_dir,
+ "Azithromycin","studies/azithro","Baseline","Azithromycin",root_dir,
+ "Erythromycin","studies/erythro","Baseline","Erythromycin",root_dir,
+)
+
+kable(study_config, caption = "Study configuration") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+---
+
+# ② Helper Functions
+
+```{r functions}
+# ─────────────────────────────────────────────────────────────────────────────
+#  FILE LOADING
+# ─────────────────────────────────────────────────────────────────────────────
+
+#' Load and validate a single study's data files.
+#' Returns a named list: alpha, meta, dist_mat (numeric matrix).
+load_study <- function(study_name, study_folder, baseline_timepoint) {
+
+  expected_files <- c("alpha_diversity.tsv", "bray_distance_matrix.tsv", "meta.tsv")
+  present_files  <- list.files(study_folder)
+  missing        <- setdiff(expected_files, present_files)
+  if (length(missing) > 0)
+    stop(sprintf("[%s] Missing files: %s", study_name, paste(missing, collapse = ", ")))
+
+  # ── alpha diversity ──────────────────────────────────────────────────────
+  alpha <- read_tsv(file.path(study_folder, "alpha_diversity.tsv"),
+                    show_col_types = FALSE)
+  print(colnames(alpha))
+  required_alpha <- c("sample_id","observed","shannon","simpson",
+                       "evenness_pielou","subject_id","timepoint")
+  missing_alpha  <- setdiff(required_alpha, colnames(alpha))
+  if (length(missing_alpha) > 0)
+    stop(sprintf("[%s] alpha_diversity.tsv missing columns: %s",
+                 study_name, paste(missing_alpha, collapse = ", ")))
+
+  # ── metadata ─────────────────────────────────────────────────────────────
+  meta <- read_tsv(file.path(study_folder, "meta.tsv"), show_col_types = FALSE)
+
+  required_meta <- c("sample_id","subject_id","timepoint")
+  missing_meta  <- setdiff(required_meta, colnames(meta))
+  if (length(missing_meta) > 0)
+    stop(sprintf("[%s] meta.tsv missing columns: %s",
+                 study_name, paste(missing_meta, collapse = ", ")))
+
+  # ── distance matrix ──────────────────────────────────────────────────────
+  dist_raw <- read_tsv(file.path(study_folder, "bray_distance_matrix.tsv"),
+                       show_col_types = FALSE)
+  row_ids  <- dist_raw[[1]]                       # first column = row names
+  dist_mat <- as.matrix(dist_raw[, -1])
+  rownames(dist_mat) <- row_ids
+  colnames(dist_mat) <- row_ids
+
+  # ── cross-file ID checks ─────────────────────────────────────────────────
+  ids_alpha <- alpha$sample_id
+  ids_meta  <- meta$sample_id
+  ids_dist  <- rownames(dist_mat)
+
+  if (!all(ids_alpha %in% ids_meta))
+    warning(sprintf("[%s] %d sample IDs in alpha not found in meta",
+                    study_name,
+                    sum(!ids_alpha %in% ids_meta)))
+
+  if (!all(ids_alpha %in% ids_dist))
+    warning(sprintf("[%s] %d sample IDs in alpha not found in distance matrix",
+                    study_name,
+                    sum(!ids_alpha %in% ids_dist)))
+
+  # ── baseline check ───────────────────────────────────────────────────────
+  if (!baseline_timepoint %in% alpha$timepoint)
+    stop(sprintf("[%s] Baseline timepoint '%s' not found in data. Available: %s",
+                 study_name, baseline_timepoint,
+                 paste(unique(alpha$timepoint), collapse = ", ")))
+
+  subj_with_baseline <- alpha %>%
+    filter(timepoint == baseline_timepoint) %>%
+    pull(subject_id) %>% unique()
+
+  subj_without_baseline <- setdiff(unique(alpha$subject_id), subj_with_baseline)
+  if (length(subj_without_baseline) > 0)
+    warning(sprintf("[%s] Subjects without a baseline sample: %s",
+                    study_name,
+                    paste(subj_without_baseline, collapse = ", ")))
+
+  # ── duplicate sample IDs ─────────────────────────────────────────────────
+  dup_ids <- alpha$sample_id[duplicated(alpha$sample_id)]
+  if (length(dup_ids) > 0)
+    warning(sprintf("[%s] Duplicated sample IDs in alpha: %s",
+                    study_name, paste(dup_ids, collapse = ", ")))
+
+  # ── ordered timepoint factor (alphabetic → use baseline-first ordering) ──
+  tp_levels <- c(baseline_timepoint,
+                 sort(setdiff(unique(alpha$timepoint), baseline_timepoint)))
+  alpha$timepoint <- factor(alpha$timepoint, levels = tp_levels)
+  meta$timepoint  <- factor(meta$timepoint,  levels = tp_levels)
+
+  message(sprintf("[%s] Loaded OK — %d samples, %d subjects, %d timepoints",
+                  study_name, nrow(alpha),
+                  n_distinct(alpha$subject_id),
+                  n_distinct(alpha$timepoint)))
+
+  list(alpha = alpha, meta = meta, dist_mat = dist_mat,
+       baseline_timepoint = baseline_timepoint)
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  ALPHA DIVERSITY — MIXED MODEL + EMMEANS
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALPHA_METRICS <- c("observed","shannon","simpson","evenness_pielou")
+
+#' Fit lmer, extract: overall F, R², pairwise emmeans vs baseline.
+#' Effect size: Cohen's d_z (within-person standardised difference) for pairs,
+#' and partial η² for the overall timepoint effect.
+fit_alpha_model <- function(df, metric, baseline_tp) {
+
+  # Drop NA in metric or subject_id / timepoint
+  df_fit <- df %>%
+    select(sample_id, subject_id, timepoint,
+           value = all_of(metric)) %>%
+    filter(!is.na(value), !is.na(subject_id), !is.na(timepoint))
+
+  # Need ≥ 2 timepoints and ≥ 2 subjects
+  if (n_distinct(df_fit$timepoint) < 2 || n_distinct(df_fit$subject_id) < 2) {
+    message(sprintf("  Skipping %s — insufficient data for model.", metric))
+    return(NULL)
+  }
+
+  tryCatch({
+    m <- lmer(value ~ timepoint + (1 | subject_id), data = df_fit,
+              REML = FALSE)
+
+    # ── overall F (ANOVA table) ─────────────────────────────────────────
+    aov_df <- as.data.frame(anova(m))
+    F_stat  <- aov_df[["F value"]][1]
+    p_val   <- aov_df[["Pr(>F)"]][1]
+
+    # ── partial η² for timepoint ────────────────────────────────────────
+    eta2 <- tryCatch(
+      eta_squared(m, partial = TRUE)$Eta2_partial[1],
+      error = function(e) NA_real_)
+
+    # ── marginal & conditional R² ───────────────────────────────────────
+    r2_vals <- tryCatch(
+      r2_nakagawa(m),
+      error = function(e) list(R2_marginal = NA, R2_conditional = NA))
+
+    # ── pairwise emmeans vs baseline ────────────────────────────────────
+    em   <- emmeans(m, ~ timepoint)
+    cont <- contrast(em,
+                     method = "trt.vs.ctrl",   # each vs first (= baseline)
+                     ref    = baseline_tp,
+                     adjust = "fdr")
+    cont_df <- as.data.frame(cont) %>%
+      rename(comparison = contrast,
+             estimate   = estimate,
+             SE         = SE,
+             p.value    = p.value) %>%
+      mutate(
+        comparison_timepoint = str_extract(comparison, "(?<=- ).*|(?<=\\().*(?=\\))"),
+        # Cohen's d_z = estimate / SD_diff (approx from SE × sqrt(n_pairs))
+        n_pairs = n_distinct(df_fit$subject_id),
+        # SD_diff ≈ SE × sqrt(n)  (from paired t-test equivalence)
+        cohen_dz = estimate / (SE * sqrt(n_pairs))
+      )
+
+    list(
+      metric              = metric,
+      F_stat              = F_stat,
+      p_overall           = p_val,
+      eta2_partial        = eta2,
+      R2_marginal         = r2_vals$R2_marginal,
+      R2_conditional      = r2_vals$R2_conditional,
+      pairwise            = cont_df,
+      model               = m
+    )
+  }, error = function(e) {
+    message(sprintf("  Model failed for %s: %s", metric, conditionMessage(e)))
+    NULL
+  })
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  BETA DIVERSITY — PAIRWISE PERMANOVA
+# ─────────────────────────────────────────────────────────────────────────────
+library(permute)
+
+pairwise_adonis2 <- function(dist_obj,
+                             factors,
+                             strata       = NULL,
+                             p.adjust.m   = "bonferroni",
+                             permutations = 9999) {
+
+  if (!inherits(dist_obj, "dist"))
+    stop("dist_obj must be a 'dist' object.")
+
+  # ── BUG B FIX: remove NA timepoints before anything else ─────────────────
+  factors <- trimws(as.character(factors))
+  na_idx  <- is.na(factors) | factors == "NA"
+
+  if (any(na_idx)) {
+    message(sprintf("  Removing %d sample(s) with NA/missing timepoint.", sum(na_idx)))
+    dm_mat  <- as.matrix(dist_obj)
+    dist_obj <- as.dist(dm_mat[!na_idx, !na_idx])
+    if (!is.null(strata)) strata <- strata[!na_idx]
+    factors <- factors[!na_idx]
+  }
+
+  unique_tp <- sort(unique(factors))
+
+  if (length(unique_tp) < 2) {
+    warning("pairwise_adonis2: need >= 2 unique timepoints after NA removal.")
+    return(tibble())
+  }
+
+
+  tp_a_vec <- character(0)
+  tp_b_vec <- character(0)
+  for (i in seq_len(length(unique_tp) - 1)) {
+    for (j in seq(i + 1, length(unique_tp))) {
+      tp_a_vec <- c(tp_a_vec, unique_tp[i])
+      tp_b_vec <- c(tp_b_vec, unique_tp[j])
+    }
+  }
+
+  message(sprintf("  %d pair(s) to test: %s",
+                  length(tp_a_vec),
+                  paste(paste(tp_a_vec, "vs", tp_b_vec), collapse = " | ")))
+
+  out_rows <- vector("list", length(tp_a_vec))
+
+  for (k in seq_along(tp_a_vec)) {
+    tp_a <- tp_a_vec[k]
+    tp_b <- tp_b_vec[k]
+
+    idx <- which(factors %in% c(tp_a, tp_b))
+    tab <- table(factors[idx])
+
+    if (any(tab < 2) || length(idx) < 4) {
+      message(sprintf("  Skipping '%s' vs '%s': too few samples (n=%d, counts: %s)",
+                      tp_a, tp_b, length(idx),
+                      paste(names(tab), tab, sep = "=", collapse = ", ")))
+      next
+    }
+
+    sub_dist  <- as.dist(as.matrix(dist_obj)[idx, idx])
+    sub_fac   <- factor(factors[idx])
+    sub_strat <- if (!is.null(strata)) strata[idx] else NULL
+
+    # Use permute::how(blocks=) — adonis2 dropped strata= in vegan >= 2.6
+    perm_scheme <- if (!is.null(sub_strat)) {
+      tryCatch(
+        permute::how(nperm = permutations, blocks = factor(sub_strat)),
+        error = function(e) {
+          message(sprintf("  how() failed for '%s' vs '%s'; using free permutations.", tp_a, tp_b))
+          permutations
+        }
+      )
+    } else {
+      permutations
+    }
+
+    ad <- tryCatch(
+      vegan::adonis2(sub_dist ~ sub_fac, permutations = perm_scheme),
+      error = function(e) {
+        message(sprintf("  adonis2 error for '%s' vs '%s': %s", tp_a, tp_b, conditionMessage(e)))
+        NULL
+      }
+    )
+
+    if (!is.null(ad)) {
+      out_rows[[k]] <- data.frame(
+        pair    = paste(tp_a, "vs", tp_b),
+        tp_from = tp_a,
+        tp_to   = tp_b,
+        F_model = ad$F[1],
+        R2      = ad$R2[1],
+        p_value = ad$`Pr(>F)`[1],
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  # Bind only non-NULL rows
+  results <- do.call(rbind, Filter(Negate(is.null), out_rows))
+
+  if (is.null(results) || nrow(results) == 0) {
+    message("  pairwise_adonis2: all pairs returned empty.")
+    return(tibble())
+  }
+
+  as_tibble(results) %>%
+    mutate(
+      p_adjusted = p.adjust(p_value, method = p.adjust.m),
+      sig = case_when(
+        p_adjusted <= 0.0001 ~ "***",
+        p_adjusted <= 0.001  ~ "**",
+        p_adjusted <= 0.01   ~ "*",
+        p_adjusted <= 0.05   ~ ".",
+        TRUE                 ~ "ns"
+      )
+    )
+}
+# ─────────────────────────────────────────────────────────────────────────────
+#  WITHIN-SUBJECT BRAY-CURTIS DISTANCE FROM BASELINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+#' For each subject, compute Bray-Curtis distance between their baseline
+#' sample and each of their post-baseline samples.
+within_subject_distances <- function(dist_mat, meta, baseline_tp) {
+
+  meta <- meta %>%
+    filter(sample_id %in% rownames(dist_mat)) %>%
+    mutate(timepoint = trimws(as.character(timepoint)))   # guard against factor
+
+  baseline_meta <- meta %>%
+    filter(timepoint == baseline_tp) %>%
+    select(subject_id, baseline_sample = sample_id)
+
+  post_meta <- meta %>%
+    filter(timepoint != baseline_tp) %>%
+    select(subject_id,
+           comparison_timepoint = timepoint,
+           comparison_sample    = sample_id)
+
+  joined <- inner_join(baseline_meta, post_meta, by = "subject_id")
+
+  if (nrow(joined) == 0) {
+    warning(sprintf("within_subject_distances [%s]: no matched baseline-post pairs.", baseline_tp))
+    return(tibble())
+  }
+
+  joined %>%
+    mutate(
+      bray_distance = map2_dbl(
+        baseline_sample, comparison_sample,
+        ~ {
+          if (.x %in% rownames(dist_mat) && .y %in% rownames(dist_mat))
+            dist_mat[.x, .y]
+          else NA_real_
+        }
+      ),
+      baseline_timepoint = baseline_tp        # ← add as new column directly
+    ) %>%
+    select(subject_id, baseline_timepoint,    # ← no renaming, column now exists
+           comparison_timepoint, bray_distance)
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  UTILITY — significance stars
+# ─────────────────────────────────────────────────────────────────────────────
+sig_stars <- function(p) {
+  case_when(
+    p <= 0.0001 ~ "***",
+    p <= 0.001  ~ "**",
+    p <= 0.01   ~ "*",
+    p <= 0.05   ~ ".",
+    TRUE        ~ "ns"
+  )
+}
+
+```
+
+---
+
+# ③ Data Loading & Quality Checks
+
+```{r load-data, results='asis'}
+study_data <- pmap(study_config, function(study_name, study_folder,
+                                           baseline_timepoint, group,sdir) {
+  cat(sprintf("\n### Loading: %s\n\n", study_name))
+  d <- load_study(study_name, file.path(sdir,study_folder), baseline_timepoint)
+  d$group <- group
+  d
+}) %>% set_names(study_config$study_name)
+
+# Print per-study summaries
+imap(study_data, function(d, nm) {
+  cat(sprintf(
+    "\n**%s**: %d samples | %d subjects | timepoints: %s | baseline: `%s`\n\n",
+    nm,
+    nrow(d$alpha),
+    n_distinct(d$alpha$subject_id),
+    paste(levels(d$alpha$timepoint), collapse = " → "),
+    d$baseline_timepoint
+  ))
+}) %>% invisible()
+```
+
+---
+
+# ④ Alpha-Diversity Analysis
+
+## Mixed models (per study × metric)
+
+```{r alpha-models, cache=TRUE}
+alpha_results <- imap(study_data, function(d, sname) {
+  message(sprintf("\n── %s ──", sname))
+  metrics = ALPHA_METRICS
+  if(sname=="EP395"){
+    metrics = c(ALPHA_METRICS,"Faiths_PD")
+  }
+  map(metrics, function(m) {
+    message(sprintf("  Fitting: %s", m))
+    fit_alpha_model(d$alpha, m, d$baseline_timepoint)
+  }) %>% set_names(metrics)
+})
+```
+
+## Global model result table
+
+```{r alpha-global-table}
+alpha_global <- imap_dfr(alpha_results, function(study_res, sname) {
+  imap_dfr(study_res, function(res, metric) {
+    if (is.null(res)) return(NULL)
+    tibble(
+      study          = sname,
+      group          = study_config$group[study_config$study_name == sname],
+      metric         = metric,
+      F_stat         = round(res$F_stat, 3),
+      p_overall      = round(res$p_overall, 4),
+      sig            = sig_stars(res$p_overall),
+      eta2_partial   = round(res$eta2_partial, 3),
+      R2_marginal    = round(res$R2_marginal, 3),
+      R2_conditional = round(res$R2_conditional, 3)
+    )
+  })
+})
+
+write_tsv(alpha_global, file.path(tbl_dir,"alpha_global_model_results.tsv"))
+
+alpha_global %>%
+  kable(caption = "Alpha-diversity: overall mixed-model results (per study × metric)") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE) %>%
+  column_spec(5, bold = TRUE,
+              color = ifelse(alpha_global$p_overall < 0.05, "firebrick", "black"))
+```
+
+## Pairwise contrasts vs baseline
+
+```{r alpha-pairwise-table}
+alpha_pairwise <- imap_dfr(alpha_results, function(study_res, sname) {
+  bl_tp <- study_data[[sname]]$baseline_timepoint
+  imap_dfr(study_res, function(res, metric) {
+    if (is.null(res)) return(NULL)
+    res$pairwise %>%
+      mutate(
+        study              = sname,
+        group              = study_config$group[study_config$study_name == sname],
+        metric             = metric,
+        baseline_timepoint = bl_tp
+      ) %>%
+      select(study, group, metric, baseline_timepoint,
+             comparison, estimate, SE, df,
+             t_ratio = t.ratio,
+             p_value = p.value,
+             cohen_dz, n_pairs)
+  })
+})
+
+# FDR-adjust within study × metric
+alpha_pairwise <- alpha_pairwise %>%
+  group_by(study, metric) %>%
+  mutate(p_adjusted = p.adjust(p_value, method = "fdr")) %>%
+  ungroup() %>%
+  mutate(sig = sig_stars(p_adjusted))
+
+write_tsv(alpha_pairwise, file.path(tbl_dir,"alpha_pairwise_vs_baseline.tsv"))
+
+alpha_pairwise %>%
+  select(study, metric, comparison, estimate, SE,
+         p_value, p_adjusted, sig, cohen_dz) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  kable(caption = "Alpha-diversity: pairwise contrasts vs baseline (FDR-adjusted)") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE)
+```
+
+---
+
+# ⑤ Beta-Diversity Analysis
+
+## Global PERMANOVA (all timepoints vs timepoint factor)
+
+```{r beta-global, cache=TRUE}
+beta_global <- imap_dfr(study_data, function(d, sname) {
+  message(sprintf("Global PERMANOVA: %s", sname))
+
+  # Align distance matrix to samples in meta
+  common_ids <- intersect(rownames(d$dist_mat), d$meta$sample_id)
+  dm_sub  <- as.dist(d$dist_mat[common_ids, common_ids])
+  meta_sub <- d$meta %>% filter(sample_id %in% common_ids) %>%
+    arrange(match(sample_id, common_ids))
+
+  tryCatch({
+    ad <- adonis2(dm_sub ~ timepoint,
+                  data         = meta_sub,
+                  strata       = meta_sub$subject_id,
+                  permutations = 9999)
+    tibble(
+      study   = sname,
+      group   = d$group,
+      method  = "Bray-Curtis PERMANOVA",
+      F_model = ad$F[1],
+      R2      = ad$R2[1],
+      p_value = ad$`Pr(>F)`[1],
+      sig     = sig_stars(ad$`Pr(>F)`[1])
+    )
+  }, error = function(e) {
+    message("  PERMANOVA failed: ", conditionMessage(e))
+    NULL
+  })
+})
+
+write_tsv(beta_global, file.path(tbl_dir,"beta_global_permanova_results.tsv"))
+
+beta_global %>%
+  mutate(across(c(F_model, R2, p_value), ~ round(.x, 4))) %>%
+  kable(caption = "Beta-diversity: global PERMANOVA (timepoint effect per study)") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE)
+```
+
+## Pairwise PERMANOVA vs baseline
+
+```{r beta-pairwise, cache=TRUE}
+beta_pairwise_list <- imap(study_data, function(d, sname) {
+
+  message(sprintf("\n── Pairwise PERMANOVA: %s ──", sname))
+
+  # 1. Find samples present in both the distance matrix and metadata
+  common_ids <- intersect(rownames(d$dist_mat), d$meta$sample_id)
+  message(sprintf("  Samples in dist matrix : %d", nrow(d$dist_mat)))
+  message(sprintf("  Samples in meta        : %d", nrow(d$meta)))
+  message(sprintf("  Common IDs (dist & meta): %d", length(common_ids)))
+
+  if (length(common_ids) < 4) {
+    message("  SKIP: fewer than 4 common sample IDs.")
+    return(NULL)
+  }
+
+  dm_sub <- as.dist(d$dist_mat[common_ids, common_ids])
+
+  # 2. Subset meta and ORDER rows to match the distance matrix
+  #    FIX 3: coerce timepoint to plain character to avoid factor/string mismatch
+  meta_sub <- d$meta %>%
+    filter(sample_id %in% common_ids) %>%
+    arrange(match(sample_id, common_ids)) %>%
+    mutate(
+      timepoint  = trimws(as.character(timepoint)),
+      subject_id = as.character(subject_id)
+    )
+
+  message(sprintf("  Baseline timepoint set : '%s'", d$baseline_timepoint))
+  message(sprintf("  Timepoints in subset   : %s",
+                  paste(sort(unique(meta_sub$timepoint)), collapse = ", ")))
+
+  if (!d$baseline_timepoint %in% meta_sub$timepoint) {
+    message(sprintf("  SKIP: baseline '%s' not found after ID intersection.",
+                    d$baseline_timepoint))
+    return(NULL)
+  }
+
+  # 3. Run pairwise PERMANOVA
+  res <- tryCatch(
+    pairwise_adonis2(
+      dist_obj     = dm_sub,
+      factors      = meta_sub$timepoint,
+      strata       = meta_sub$subject_id,
+      p.adjust.m   = "bonferroni",
+      permutations = 9999
+    ),
+    error = function(e) {
+      message("  ERROR in pairwise_adonis2: ", conditionMessage(e))
+      NULL
+    }
+  )
+
+  if (is.null(res) || nrow(res) == 0) {
+    message("  No results returned — see messages above.")
+    return(NULL)
+  }
+
+  message(sprintf("  All pairs computed: %s", paste(res$pair, collapse = " | ")))
+
+  # 4. Filter to pairs involving the baseline
+  bl <- trimws(d$baseline_timepoint)
+
+  bl_pairs <- res %>%
+    filter(trimws(tp_from) == bl | trimws(tp_to) == bl)
+
+  message(sprintf("  Pairs involving baseline '%s': %d", bl, nrow(bl_pairs)))
+
+  if (nrow(bl_pairs) == 0) {
+    message("  WARNING: baseline not matched in results.")
+    message(sprintf("  tp_from values: %s", paste(res$tp_from, collapse = ", ")))
+    message(sprintf("  tp_to   values: %s", paste(res$tp_to,   collapse = ", ")))
+    return(NULL)
+  }
+
+  # 5. Annotate and return
+  bl_pairs %>%
+    mutate(
+      study                = sname,
+      group                = d$group,
+      baseline_timepoint   = bl,
+      comparison_timepoint = if_else(trimws(tp_from) == bl, tp_to, tp_from)
+    ) %>%
+    select(study, group, baseline_timepoint, comparison_timepoint,
+           pair, F_model, R2, p_value, p_adjusted, sig)
+})
+
+# Bind, save, display
+beta_pairwise <- bind_rows(beta_pairwise_list)
+
+if (nrow(beta_pairwise) == 0) {
+  message("beta_pairwise is empty — check console messages above.")
+  cat("> **No pairwise PERMANOVA results produced.** Check the knit log.\n")
+} else {
+  write_tsv(beta_pairwise, file.path(tbl_dir,"beta_pairwise_vs_baseline.tsv"))
+
+  beta_pairwise %>%
+    mutate(across(c(F_model, R2, p_value, p_adjusted), ~ round(.x, 4))) %>%
+    kable(caption = "Beta-diversity: pairwise PERMANOVA vs study baseline") %>%
+    kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                  full_width = TRUE)
+}
+```
+
+---
+
+# ⑥ Within-Subject Distance from Baseline
+
+```{r within-subject-distances}
+dist_from_bl <- imap_dfr(study_data, function(d, sname) {
+  common_ids <- intersect(rownames(d$dist_mat), d$meta$sample_id)
+  meta_sub   <- d$meta %>% filter(sample_id %in% common_ids)
+
+  res <- within_subject_distances(d$dist_mat[common_ids, common_ids],
+                                  meta_sub,
+                                  d$baseline_timepoint)
+  if (nrow(res) == 0) return(NULL)
+  res %>% mutate(study = sname, group = d$group)
+})
+
+write_tsv(dist_from_bl, file.path(tbl_dir,"bray_distance_from_baseline.tsv"))
+
+# ── Summary table ─────────────────────────────────────────────────────────
+dist_summary <- dist_from_bl %>%
+  filter(!is.na(bray_distance)) %>%
+  group_by(study, group, comparison_timepoint) %>%
+  summarise(
+    n      = n(),
+    mean   = round(mean(bray_distance),   3),
+    median = round(median(bray_distance), 3),
+    SD     = round(sd(bray_distance),     3),
+    IQR    = round(IQR(bray_distance),    3),
+    .groups = "drop"
+  )
+
+dist_summary %>%
+  kable(caption = "Within-subject Bray-Curtis distance from baseline — summary") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = TRUE)
+```
+
+---
+
+# ⑦ Cross-Study Effect-Size Summary
+
+```{r cross-study-summary}
+# Max Cohen's d_z per study (absolute value, across metrics)
+max_alpha_d <- alpha_pairwise %>%
+  group_by(study) %>%
+  summarise(
+    max_cohen_dz        = max(abs(cohen_dz), na.rm = TRUE),
+    best_alpha_p        = min(p_adjusted,    na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Max PERMANOVA R² vs baseline
+max_beta_R2 <- beta_pairwise %>%
+  group_by(study) %>%
+  summarise(max_beta_R2  = max(R2, na.rm = TRUE), .groups = "drop")
+
+# Max median Bray-Curtis distance from baseline
+max_bc_dist <- dist_summary %>%
+  group_by(study) %>%
+  summarise(max_median_bc = max(median, na.rm = TRUE), .groups = "drop")
+
+cross_study <- study_config %>%
+  select(study = study_name, group) %>%
+  left_join(max_alpha_d,  by = "study") %>%
+  left_join(max_beta_R2,  by = "study") %>%
+  left_join(max_bc_dist,  by = "study") %>%
+  mutate(
+    perturbation_level = case_when(
+      max_beta_R2 >= 0.15 | max_median_bc >= 0.30 | max_cohen_dz >= 0.80 ~ "Strong",
+      max_beta_R2 >= 0.07 | max_median_bc >= 0.15 | max_cohen_dz >= 0.50 ~ "Moderate",
+      TRUE ~ "Low"
+    )
+  )
+
+write_tsv(cross_study, "tables/cross_study_effect_size_summary.tsv")
+
+cross_study %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  kable(caption = "Cross-study effect-size summary") %>%
+  kable_styling(bootstrap_options = c("striped","hover"), full_width = FALSE) %>%
+  column_spec(7, bold = TRUE,
+              color = case_when(
+                cross_study$perturbation_level == "Strong"   ~ "firebrick",
+                cross_study$perturbation_level == "Moderate" ~ "darkorange",
+                TRUE ~ "steelblue"
+              ))
+```
+
+---
+
+# ⑧ Figures
+
+## Figure 1 — Alpha-Diversity Trajectories
+
+```{r fig-alpha-trajectories, fig.height=9}
+alpha_long <- imap_dfr(study_data, function(d, sname) {
+  d$alpha %>%
+    select(sample_id, subject_id, timepoint,
+           all_of(ALPHA_METRICS)) %>%
+    pivot_longer(all_of(ALPHA_METRICS),
+                 names_to = "metric", values_to = "value") %>%
+    mutate(study = sname, group = d$group)
+})
+
+# Mean ± SE per study × metric × timepoint
+alpha_summ <- alpha_long %>%
+  group_by(study, group, metric, timepoint) %>%
+  summarise(
+    mean_val = mean(value,  na.rm = TRUE),
+    se_val   = sd(value, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# One panel per metric, lines per study
+p_alpha_traj <- alpha_long %>%
+  ggplot(aes(x = timepoint, y = value,
+             colour = study, group = subject_id)) +
+  geom_line(alpha = 0.15, linewidth = 0.4) +
+  geom_point(alpha = 0.2, size = 1) +
+  geom_line(data = alpha_summ,
+            aes(x = timepoint, y = mean_val, group = study,
+                colour = study, linetype = group),
+            linewidth = 1.2, inherit.aes = FALSE) +
+  geom_errorbar(data = alpha_summ,
+                aes(x = timepoint, y = mean_val,
+                    ymin = mean_val - se_val,
+                    ymax = mean_val + se_val,
+                    colour = study),
+                width = 0.15, linewidth = 0.8,
+                inherit.aes = FALSE) +
+  facet_wrap(~ metric, scales = "free_y", nrow = 2) +
+  scale_linetype_manual(values = c("EP395" = "solid", "Antibiotic" = "dashed",
+                                   "Other" = "dotted")) +
+  labs(title    = "Alpha-Diversity Trajectories by Study",
+       subtitle = "Thin lines = individual subjects; thick lines = group mean ± SE",
+       x = "Timepoint", y = "Diversity value",
+       colour = "Study", linetype = "Group") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave(file.path(fig_dir,"Fig1_alpha_trajectories.pdf"),
+       p_alpha_traj, width = 12, height = 9)
+ggsave(file.path(fig_dir,"Fig1_alpha_trajectories.png"),
+       p_alpha_traj, width = 12, height = 9, dpi = 150)
+print(p_alpha_traj)
+```
+
+## Figure 2 — Alpha Effect-Size Comparison (Cohen's *d*~z~)
+
+```{r fig-alpha-effect-size, fig.height=6}
+selected_pair <- c("Baseline 2 - Baseline 1","(1-week EP395) - Baseline 1",
+                   "Day007 - Day001","Dag8 - Dag0","ABX - Baseline")
+level_comparison <- c( "Glasmacinal\nBL2 - BL1","Glasmacinal\n1W - BL1",
+                      "Azithromycin\n4W - BL",
+                      "Erythromycin\n4W - BL",
+                      "Amoxicillin_clavulanate\nDay 7 - Day 1",
+                     "Tebipenem\nDay 7 - Day 1",
+                      "MER+GEN+VAN\nDay 8 - Day 1")
+
+plot_df <- alpha_pairwise %>% 
+  mutate(
+      comparison_label = case_when(
+      study == "EP395" & comparison == "(1-week EP395) - Baseline 1" ~  "Glasmacinal\n1W - BL1",
+      study == "EP395" & comparison == "Baseline 2 - Baseline 1" ~  "Glasmacinal\nBL2 - BL1",
+      study == "Azithromycin" ~ "Azithromycin\n4W - BL",
+      study == "Erythromycin" ~ "Erythromycin\n4W - BL",
+      study == "Amoxicillin_clavulanate" ~ "Amoxicillin_clavulanate\nDay 7 - Day 1",
+      study == "Tebipenem" ~ "Tebipenem\nDay 7 - Day 1",
+      study == "MER-GEN-VAN" ~ "MER+GEN+VAN\nDay 8 - Day 1",
+      TRUE ~ paste0(study, "\n", comparison)
+    ),
+    #group = factor(group, levels = study_groups_levels),
+    metric = factor(metric, levels = names(METRIC_COLOURS)),
+  ) %>% filter(comparison %in% selected_pair & metric != "Faiths_PD") %>% 
+  mutate(comparison_label=factor(comparison_label,levels=rev(level_comparison)))
+
+p_alpha_es <- ggplot(plot_df, aes(x = cohen_dz, y = comparison_label,
+                                   fill = metric, shape = metric)) +  # Changed: colour → fill
+  geom_vline(xintercept = seq(from = -3, to = 1, by = 1),
+             linetype = "dotted", colour = "grey70") +
+  geom_vline(xintercept = 0, colour = "grey30", linewidth = 0.5) +
+  geom_errorbarh(aes(xmin = cohen_dz - 1.96 * (abs(cohen_dz)/abs(t_ratio)),
+                     xmax = cohen_dz + 1.96 * (abs(cohen_dz)/abs(t_ratio)),color=metric),
+                 position = position_dodge(width = 0.5),
+                 height = 0.3, alpha = 0.5) +
+  geom_point(size = 2, color = "black", stroke = 0.5, alpha = 0.7,
+             position = position_dodge(width = 0.5)) +
+  scale_fill_manual(values = METRIC_COLOURS, labels = METRIC_LABELS, name = "") +
+  scale_color_manual(values = METRIC_COLOURS,labels = METRIC_LABELS, name = "") +
+  scale_shape_manual(values = METRIC_SHAPES, labels = METRIC_LABELS, name = "") +
+  labs(title = "Alpha-Diversity: Cohen's d_z vs Baseline by Study",
+       x = "Cohen's d_z",
+       y = NULL) +
+  theme(axis.text.y = element_text(size = 10),
+        legend.position = "top") + 
+  guides(fill = guide_legend(override.aes = list(size = 3, color = "black", stroke = 0.5)),
+         shape = guide_legend(override.aes = list(size = 3, color = "black", stroke = 0.5)))
+
+p_alpha_es
+write_tsv(plot_df%>%select(-comparison_label),file.path(tbl_dir,"alpha_effect_sizes_fig2.tsv"))
+ggsave(file.path(fig_dir,"Fig2_alpha_effect_sizes.pdf"),
+       p_alpha_es, width = 9, height = 7)
+ggsave(file.path(fig_dir,"Fig2_alpha_effect_sizes.png"),
+       p_alpha_es, width = 10, height = max(6, nrow(alpha_pairwise) * 0.3), dpi = 150)
+
+```
+
+## Figure 3 — PERMANOVA R² Comparison
+
+```{r fig-permanova-R2}
+
+selected_pair <- c("1-week EP395 vs Baseline 1",
+                   "Baseline 1 vs Baseline 2",
+                   "Day001 vs Day007","Dag0 vs Dag8","ABX vs Baseline")
+plot_df <- beta_pairwise %>%
+  mutate(
+    label = case_when(
+      study == "EP395" & comparison_timepoint == "1-week EP395" ~  "Glasmacinal\n1W - BL1",
+      study == "EP395" & comparison_timepoint == "Baseline 2" ~  "Glasmacinal\nBL2 - BL1",
+      study == "Azithromycin" ~ "Azithromycin\n4W - BL",
+      study == "Erythromycin" ~ "Erythromycin\n4W - BL",
+      study == "Amoxicillin_clavulanate" ~ "Amoxicillin_clavulanate\nDay 7 - Day 1",
+      study == "Tebipenem" ~ "Tebipenem\nDay 7 - Day 1",
+      study == "MER-GEN-VAN" ~ "MER+GEN+VAN\nDay 8 - Day 1",
+      TRUE ~ paste0(study, "\n", pair)
+    ),
+    group = factor(group, levels = study_groups_levels)
+  ) %>% filter(pair %in% selected_pair) %>%
+   mutate(label=factor(label,levels=rev(level_comparison)))
+
+p_R2 <- plot_df %>% 
+  ggplot(aes(x = R2, y = reorder(label, R2), fill = group)) +
+  geom_vline(xintercept = c(0.05, 0.10, 0.15, 0.20),
+             linetype = "dashed", colour = "grey70") +
+  geom_point(size = 4, alpha = 0.7, shape = 21, color = "black") +
+  geom_text(aes(label = sig), nudge_x = 0.01, size = 4, hjust = 0) +
+  scale_fill_manual(values = GROUP_COLOURS, name = "") +
+  scale_x_continuous("PERMANOVA R² (Bray-Curtis)",
+                     limits = c(0, 0.3),  # Fixed: stretched to 0.4
+                     labels = number_format(accuracy = 0.01)) +
+  labs(title = "Beta-Diversity: PERMANOVA R² vs Baseline by Study",
+       y = NULL) +
+  theme(axis.text.y = element_text(size = 10),
+        legend.position = "top",
+        legend.direction = "horizontal",  # Added: legend in one row
+        legend.box = "horizontal") +      # Added: keep all items in one box
+  guides(fill = guide_legend(ncol = 10,  # Adjust number based on your groups
+                             override.aes = list(size = 3, color = "black", stroke = 0.5)))
+
+write_tsv(plot_df,file.path(tbl_dir,"PERMANOVA_R2_fig3.tsv"))
+
+ggsave(file.path(fig_dir,"Fig3_PERMANOVA_R2.pdf"), p_R2, width = 9, height = 7)
+ggsave(file.path(fig_dir,"Fig3_PERMANOVA_R2.png"), p_R2, width = 9, height = max(5, nrow(beta_pairwise)*0.4), dpi = 150)
+p_R2
+```
+
+## Figure 4 — Bray-Curtis Distance from Baseline
+
+```{r fig-bc-boxplot, fig.height=5}
+p_bc <- dist_from_bl %>%
+  filter(!is.na(bray_distance)) %>%
+  mutate(group = factor(group, levels = c("EP395","Antibiotic","Other"))) %>%
+  ggplot(aes(x = comparison_timepoint, y = bray_distance,
+             fill = group, colour = group)) +
+  geom_boxplot(alpha = 0.5, outlier.shape = NA, width = 0.5) +
+  geom_jitter(width = 0.12, size = 1.5, alpha = 0.7) +
+  facet_wrap(~ study, scales = "free_x") +
+  scale_fill_manual(values   = GROUP_COLOURS) +
+  scale_colour_manual(values = GROUP_COLOURS) +
+  labs(title    = "Within-Subject Bray-Curtis Distance from Baseline",
+       subtitle = "Each point = one subject at one post-baseline timepoint",
+       x = "Post-baseline timepoint",
+       y = "Bray-Curtis distance from baseline",
+       fill = "Group", colour = "Group") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("figures/Fig4_BC_distance_from_baseline.pdf",
+       p_bc, width = 12, height = 5)
+ggsave("figures/Fig4_BC_distance_from_baseline.png",
+       p_bc, width = 12, height = 5, dpi = 150)
+print(p_bc)
+```
+
+## Figure 5 — Effect-Size Heatmap Summary
+
+```{r fig-heatmap, fig.height=4}
+# Assemble a study × metric matrix of |Cohen's d_z| for the
+# strongest post-baseline contrast per study × metric
+hm_data <- alpha_pairwise %>%
+  group_by(study, metric) %>%
+  slice_max(abs(cohen_dz), n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(study, metric, cohen_dz) %>%
+  pivot_wider(names_from = metric, values_from = cohen_dz)
+
+# Add PERMANOVA R² and BC distance as extra "metrics"
+beta_max <- beta_pairwise %>%
+  group_by(study) %>%
+  slice_max(R2, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(study, PERMANOVA_R2 = R2)
+
+bc_max <- dist_summary %>%
+  group_by(study) %>%
+  slice_max(median, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(study, BC_from_baseline = median)
+
+hm_wide <- hm_data %>%
+  left_join(beta_max, by = "study") %>%
+  left_join(bc_max,   by = "study") %>%
+  column_to_rownames("study")
+
+# Normalise columns 0-1 for colour comparability across different scales
+hm_scaled <- apply(hm_wide, 2, function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (diff(rng) == 0) return(rep(0.5, length(x)))
+  (x - rng[1]) / diff(rng)
+})
+
+p_heatmap <- pheatmap::pheatmap(
+  hm_scaled,
+  color            = colorRampPalette(c("white","#FEE090","#D73027"))(50),
+  cluster_rows     = FALSE,
+  cluster_cols     = FALSE,
+  display_numbers  = round(hm_wide, 2),
+  number_format    = "%.2f",
+  fontsize_number  = 9,
+  main             = "Effect-Size Heatmap (column-normalised 0–1)",
+  filename         = file.path(fig_dir,"Fig5_effect_size_heatmap.pdf"),
+  width            = 8,
+  height           = max(3, nrow(hm_scaled) * 0.7)
+)
+```
+
+## Figure 6 — PCoA Plots (Optional)
+
+```{r fig-pcoa, fig.height=5}
+
+custom_order <- c("EP395", "Azithromycin", "Erythromycin", 
+                  "Amoxicillin_clavulanate", "Tebipenem", "MER-GEN-VAN")
+study_data_s <- study_data[custom_order]
+
+pcoa_plots <- imap(study_data_s, function(d, sname) {
+    print(sname)
+    timepoint_levels <- list(
+    "EP395" = c("Baseline 1", "1-week glasmacinal"),
+    "Azithromycin" = c("Baseline", "ABX"),
+    "Erythromycin" = c("Baseline", "ABX"),
+    "Amoxicillin_clavulanate" = c("Day001", "Day007"),
+    "Tebipenem" = c("Day001", "Day007"),
+    "MER-GEN-VAN" = c("Dag0", "Dag8")
+  )
+   study_title <- list(
+    "EP395" = "Glasmacinal",
+    "Azithromycin" = "Azithromycin",
+    "Erythromycin" = "Erythromycin",
+    "Amoxicillin_clavulanate" = "Amoxicillin_clavulanate",
+    "Tebipenem" = "Tebipenem",
+    "MER-GEN-VAN" = "MER+GEN+VAN"
+  )  
+  sample_id <- d$meta %>% 
+    filter(timepoint %in% c("Baseline 1", "1-week EP395",
+                            "Day001", "Day007",
+                            "Dag0", "Dag8",
+                            "ABX", "Baseline")) %>% 
+    pull(sample_id)
+  
+  common_ids <- intersect(rownames(d$dist_mat), sample_id)
+  if (length(common_ids) < 4) return(NULL)
+ 
+
+  dm_sub   <- d$dist_mat[common_ids, common_ids]
+  meta_sub <- d$meta %>% filter(sample_id %in% common_ids) %>%
+    arrange(match(sample_id, common_ids)) 
+ 
+
+  pcoa_res  <- ape::pcoa(as.dist(dm_sub))
+  pcoa_axes <- as.data.frame(pcoa_res$vectors[, 1:2]) %>%
+    set_names(c("PC1","PC2")) %>%
+    rownames_to_column("sample_id") %>%
+    left_join(meta_sub, by = "sample_id")
+
+  pcoa_axes <- pcoa_axes %>% mutate(timepoint=case_when(
+    timepoint == "1-week EP395" ~ "1-week glasmacinal",
+    TRUE ~ timepoint)) %>%
+     mutate(timepoint = factor(timepoint, 
+                               levels = timepoint_levels[[sname]])) %>%
+    arrange(subject_id, timepoint)
+  
+  eig_pct <- round(pcoa_res$values$Relative_eig[1:2] * 100, 1)
+  
+  print(pcoa_axes)
+ 
+   ggplot(pcoa_axes,
+         aes(x = PC1, y = PC2, fill = timepoint, group = subject_id)) +
+    geom_point(size = 4,shape=21,alpha=0.8) +
+    geom_path(arrow = arrow(length = unit(0.2,"cm")),
+              linewidth = 0.4, colour = "grey50") +
+   
+    stat_ellipse(aes(color=timepoint,group = timepoint), type = "t", linetype = "dashed",
+                 level = 0.80, alpha = 0.7) +
+    scale_fill_brewer(palette = "Set2", name="") +
+    scale_color_brewer(palette = "Set2", name="") +
+    labs(
+      title    = sprintf("%s", study_title[[sname]]),
+      #subtitle = "Arrows connect baseline → later timepoints within subject",
+      x = sprintf("PC1 [%.1f%%]", eig_pct[1]),
+      y = sprintf("PC2 [%.1f%%]", eig_pct[2]),
+      colour = "Timepoint"
+    ) + theme(legend.position = "top")
+}) 
+
+# Combine and save
+pcoa_valid <- keep(pcoa_plots, ~ !is.null(.x))
+if (length(pcoa_valid) > 0) {
+  p_pcoa_all <- wrap_plots(pcoa_valid, ncol = min(2, length(pcoa_valid))) 
+
+  ggsave(file.path(fig_dir, "Fig6_PCoA_trajectories.pdf"),
+         p_pcoa_all, width = 12, height = max(5, ceiling(length(pcoa_valid)/2)*5))
+  ggsave(file.path(fig_dir, "Fig6_PCoA_trajectories.png"),
+         p_pcoa_all, width = 12, height = max(5, ceiling(length(pcoa_valid)/2)*5), dpi = 150)
+  print(p_pcoa_all)
+} else {
+  cat("*No PCoA plots generated (insufficient data).*\n")
+}
+```
+
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
