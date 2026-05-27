@@ -1,0 +1,222 @@
+---
+title: "QIIME 2 Artifacts to CSV Export"
+subtitle: "For Manuscript Supplementary Tables"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+```
+
+# QIIME 2 Data Export Pipeline
+
+This script reads QIIME 2 artifacts (.qza files) and exports formatted tables for manuscript supplementary material.
+
+## Load Required Libraries
+
+```{r load-libraries}
+rm(list = ls())
+library(tidyverse)
+library(biomformat)
+library(jsonlite)
+library(glue)
+library(qiime2R)
+```
+
+## Helper Functions
+
+
+
+## Configuration
+
+```{r config}
+# Set your file paths here
+root_dir <- "~/projects/microbiome/workflow_results"  
+output_dir <- "~/projects/microbiome/documents/supplementary_tables"
+
+
+# Create output directory if it doesn't exist
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# QIIME 2 artifact file paths
+taxonomy_qza <- file.path(root_dir, "taxonomy_classification/taxonomy.qza")
+
+table_qza_orig <- file.path(root_dir, "artifacts/table.qza")
+evenness_qza_orig <- file.path(root_dir, "artifacts/diversities/evenness_vector.qza")
+faith_pd_qza_orig <- file.path(root_dir, "artifacts/diversities/faith_pd_vector.qza")
+unifrac_qza_orig <- file.path(root_dir, "artifacts/diversities/weighted_unifrac_distance_matrix.qza")
+
+table_qza_gcn <- file.path(root_dir, "branch_raspergade/table-corrected.qza")
+evenness_qza_gcn <- file.path(root_dir, "branch_raspergade/diversities/evenness_vector.qza")
+faith_pd_qza_gcn <- file.path(root_dir, "branch_raspergade/diversities/faith_pd_vector.qza")
+unifrac_qza_gcn <- file.path(root_dir, "branch_raspergade/diversities/weighted_unifrac_distance_matrix.qza")
+
+# Metadata file with subject-id and sample-id
+metadata_file <- file.path(root_dir, "../input_data/meta_data.tsv")
+```
+
+## Read and Process Data
+
+### 1. Feature Table with Taxonomy
+
+```{r read-table-taxonomy}
+
+export_count_table <- function(tbl_qza,tax_qza,outdir,name){
+  cat("\nReading feature table...\n")
+  ft <- read_qza(tbl_qza)
+  
+  # Create feature table dataframe
+  feature_df <- as.data.frame(ft$data) %>%
+    rownames_to_column("feature_id") %>%
+    pivot_longer(
+      cols = -feature_id,
+      names_to = "sample_id",
+      values_to = "count"
+    ) 
+  
+  cat("Reading taxonomy...\n")
+  taxonomy <- read_qza(tax_qza)$data
+  
+  # Ensure column names are correct (adjust if your taxonomy file has different names)
+  # Common column names: "Feature ID", "Taxon", "taxonomy", etc.
+  colnames(taxonomy)[1] <- "feature_id"
+  colnames(taxonomy)[2] <- "taxonomy"
+  
+  # Combine feature table with taxonomy
+  feature_taxonomy <- feature_df %>%
+    left_join(taxonomy, by = "feature_id")
+  
+  write_csv(feature_taxonomy,file.path(outdir,name))
+  
+  cat(glue("\nexported: Table counts to {file.path(outdir,name)}"))
+  cat(glue("\nFeature table: {nrow(feature_df)} observations across {n_distinct(feature_df$sample_id)} samples\n"))
+  
+}
+
+export_count_table(table_qza_orig,taxonomy_qza,output_dir,"ORIG_Feature_Counts_with_Taxonomy.csv")
+export_count_table(table_qza_gcn,taxonomy_qza,output_dir,"GCN_Feature_Counts_with_Taxonomy.csv")
+
+```
+
+### 2. Alpha Diversity Metrics
+
+```{r read-alpha-diversity}
+export_alpha_div <- function(evenness_qza,faith_pd_qza,metadata_file, outdir,name) {
+  cat("Reading alpha diversity metrics...\n")
+  
+  metadata <- read_tsv(metadata_file, show_col_types = FALSE) %>%
+    rename("sample_id"="sample-id")
+
+  # Read evenness
+  evenness <- read_qza(evenness_qza)$data %>% rownames_to_column("sample_id")
+  colnames(evenness)[2] <- "Evenness"
+  evenness <- evenness %>% select(sample_id, Evenness)
+  
+  # Read Faith's PD
+  faith_pd <- read_qza(faith_pd_qza)$data %>% rownames_to_column("sample_id")
+  if(length(colnames(faith_pd))==3){
+    colnames(faith_pd)[1] <- "_t"
+    colnames(faith_pd)[2] <- "sample_id"
+    colnames(faith_pd)[3] <- "FaithPD"
+  }else{
+    colnames(faith_pd)[2] <- "FaithPD"
+  }
+  faith_pd <- faith_pd %>% select(sample_id, FaithPD)
+  # Combine alpha diversity metrics
+  alpha_diversity <- evenness %>%
+    left_join(faith_pd, by = "sample_id") %>% 
+    left_join(metadata, by = "sample_id") 
+  
+  write_csv(alpha_diversity,file.path(outdir,name))
+
+  cat(glue("Alpha diversity: {nrow(alpha_diversity)} samples\n"))
+}
+
+export_alpha_div(evenness_qza_orig,faith_pd_qza_orig,metadata_file, output_dir,"ORIG_Alpha_Diversity_Metrics.csv")
+export_alpha_div(evenness_qza_gcn,faith_pd_qza_gcn,metadata_file, output_dir,"GCN_Alpha_Diversity_Metrics.csv")
+```
+
+
+### 3. Distance Matrix
+
+```{r read-distance-matrix}
+cat("Reading distance matrix...\n")
+
+write.csv(as.matrix(read_qza(unifrac_qza_orig)$data),file.path(output_dir,"ORIG_Weighted_UniFrac_Distance_Matrix.csv"))
+write.csv(as.matrix(read_qza(unifrac_qza_gcn)$data),file.path(output_dir,"GCN_Weighted_UniFrac_Distance_Matrix.csv"))
+
+```
+
+```{r}
+# merge differentially abundant taxonomic ranks
+
+export_da <- function(input_dir, pattern,outdir,name){
+    files <- list.files(input_dir, pattern = pattern, full.names = TRUE)
+    
+    if (length(files) == 0) {
+      stop("No files found matching pattern: ", pattern)
+    }
+    
+    cat("Found", length(files), "files:\n")
+    print(basename(files))
+    
+    # Function to extract taxonomic rank from filename
+    extract_rank <- function(fname) {
+      str_extract(basename(fname), "(?<=linDA_).*(?=_Sig_LFC1\\.csv)")
+    }
+    
+    # Read, clean, select columns, and combine
+    merged_data <- map_dfr(files, ~ {
+      rank_name <- extract_rank(.x)
+      
+      read_csv(.x, show_col_types = FALSE) %>%
+        # Rename visit column
+        rename(time_point = visit) %>%
+        # Recode specific time_point values
+        mutate(time_point = case_when(
+          time_point == "v7" ~ "1-week EP395",
+          time_point == "v8" ~ "2-week EP395",
+          TRUE               ~ time_point
+        )) %>%
+        # Add taxonomic rank as first column
+        mutate(Taxonomic_Rank = rank_name, .before = 1) 
+    })
+    
+    merged_data <- merged_data %>%
+        # Select only the requested columns (in this order)
+        select(
+          Taxonomic_Rank,
+          taxa,
+          time_point,
+          baseMean,
+          log2FoldChange,
+          lfcSE,
+          stat,
+          pvalue,
+          padj,
+          reject,
+          df,
+          Taxon
+        )
+    # Export
+    output_file = file.path(outdir,name)
+    write_csv(merged_data, output_file)
+    
+    cat("\nMerged and cleaned file saved to:", output_file, "\n")
+    cat("Total rows:", nrow(merged_data), "\n")
+    cat("Unique taxonomic ranks:", paste(unique(merged_data$Taxonomic_Rank), collapse = ", "), "\n")
+    cat("Unique time points:", paste(unique(merged_data$time_point), collapse = ", "), "\n")
+}
+
+export_da(file.path(root_dir,"/branch_raspergade/export"),
+          "linDA_.*_Sig_LFC1\\.csv",
+          output_dir,"GCN_inDA_merged_all_ranks_Sig_LFC1.csv")
+```
+
