@@ -11,6 +11,14 @@ library(qiime2R)
 library(tidyverse)
 library(ape)
 
+export_dir <- "../export"
+tree_dir <- file.path(export_dir,"phylo_tree")
+itol_dir <- file.path(tree_dir,"itol")
+
+if (!dir.exists(itol_dir)) {
+  dir.create(itol_dir, recursive = TRUE)
+}
+
 feature_table <-read_qza("../artifacts/table.qza")$data
 taxonomy_annot <- read_qza('../artifacts/taxonomy_classification/taxonomy.qza')$data
 taxonomy_annot <-taxonomy_annot %>% mutate(taxa = str_remove_all(Taxon, "D_\\d__")) %>%
@@ -53,22 +61,22 @@ library(ggtree)
 library(ggplot2)
 library(randomcoloR)
 
-tree <- read.tree("../../phylogentic_tree/exported-tree/tree.nwk")
+tree <- read.tree("../artifacts/phylogentic_tree/tree.nwk")
 
 tree <- keep.tip(tree, keep_cols)
-write.tree(tree,"../../phylogentic_tree/exported-tree/tree_f30.nwk")
+write.tree(tree,file.path(export_dir,"tree_f30.nwk"))
 
 asv_meta <- taxonomy_annot %>% filter(Feature.ID %in% keep_cols)
 
-write_csv(asv_meta,"../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
+write_csv(asv_meta,file.path(export_dir,"asv_metadata_f30.csv"))
 
 
 ```
 differentially abundant taxa after treatment v7 or v8
 ```{r}
 
-asv_meta <- read.csv("../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
-DA_asvs <- read.csv("../export/linDA_ASVs_Sig_LFC1.csv")
+asv_meta <- read.csv(file.path(export_dir,"asv_metadata_f30.csv"))
+DA_asvs <- read.csv(file.path(export_dir,"linDA_ASVs_Sig_LFC1.csv"))
 colorstrip_data <- DA_asvs %>%
   mutate(
     label = taxa,
@@ -109,14 +117,14 @@ header <- c(
   "DATA"
 )
 full_content <- c(header, data_lines)
-writeLines(full_content,"../../phylogentic_tree/exported-tree/itol/itol_colorstrip_diff_ASVs_all.txt")
+writeLines(full_content,file.path(itol_dir,"itol_colorstrip_diff_ASVs_all.txt"))
 ```
 
 differentially abundant taxa for each visit
 ```{r}
 sel_visit<-"v8"
-asv_meta <- read.csv("../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
-DA_asvs <- read.csv("../export/linDA_ASVs_Sig_LFC1.csv")
+asv_meta <- read.csv(file.path(export_dir,"asv_metadata_f30.csv"))
+DA_asvs <- read.csv(file.path(export_dir,"linDA_ASVs_Sig_LFC1.csv"))
 colorstrip_data <- DA_asvs %>% merge(asv_meta %>% select(Feature.ID),by.x = "taxa",by.y = "Feature.ID",all=T) %>%
   filter(visit == !!sel_visit) %>%
   mutate(
@@ -164,16 +172,12 @@ header <- c(
   "DATA"
 )
 full_content <- c(header, data_lines)
-writeLines(full_content, paste0("../../phylogentic_tree/exported-tree/itol/itol_colorstrip_diff_ASVs",sel_visit,".txt"))
+writeLines(full_content, file.path(itol_dir,paste0("itol_colorstrip_diff_ASVs",sel_visit,".txt")))
 ```
 
 ```{r}
 library(tidyverse)
 library(scales)   # for hue_pal() or other color generators
-
-# Assume your dataframe is called 'metadata'
-# It contains at least: Feature.ID, Genus, Family, Order
-# (Feature.ID should match the leaf names in your iTOL tree)
 
 # ──────────────────────────────────────────────────────────────
 # Function to create one colorstrip dataset for a given rank
@@ -247,27 +251,27 @@ create_colorstrip_for_rank(
   asv_meta,
   rank_column   = "Genus",
   dataset_label = "Genus",
-  output_file   = "../../phylogentic_tree/exported-tree/itol/itol_colorstrip_Genus.txt"
+  output_file   = file.path(itol_dir,"itol_colorstrip_Genus.txt")
 )
 
 create_colorstrip_for_rank(
   asv_meta,
   rank_column   = "Family",
   dataset_label = "Family",
-  output_file   = "../../phylogentic_tree/exported-tree/itol/itol_colorstrip_Family.txt"
+  output_file   = file.path(itol_dir,"itol_colorstrip_Family.txt")
 )
 
 create_colorstrip_for_rank(
   asv_meta,
   rank_column   = "Order",
   dataset_label = "Order",
-  output_file   = "../../phylogentic_tree/exported-tree/itol/itol_colorstrip_Order.txt"
+  output_file   = file.path(itol_dir,"itol_colorstrip_Order.txt")
 )
 ```
 
 
 ```{r}
-abundance_df <- read.csv("../export/clr_normalizations_asvs.csv")
+abundance_df <- read.csv(file.path(export_dir,"clr_normalizations_asvs.csv"))
 metadata<-read_q2metadata("../artifacts/metadata.tsv")
 # 1. Prepare long format and join visits
 abundance_long <- abundance_df %>%
@@ -315,15 +319,15 @@ header <- c(
 
 # 5. Combine and write to file
 full_content <- c(header, data_lines)
-writeLines(full_content, "../../phylogentic_tree/exported-tree/itol/itol_heatmap_medians_CLR_counts.txt")
+writeLines(full_content, file.path(itol_dir,"itol_heatmap_medians_CLR_counts.txt"))
 ```
 
 ```{r}
 library(tidyverse)
 
 sel_visit <- "v7"
-asv_meta <- read.csv("../../phylogentic_tree/exported-tree/asv_metadata_f30.csv")
-DA_asvs  <- read.csv("../export/linDA_ASVs_Sig_LFC1.csv")
+asv_meta <- read.csv(file.path(export_dir,"asv_metadata_f30.csv"))
+DA_asvs <- read.csv(file.path(export_dir,"linDA_ASVs_Sig_LFC1.csv"))
 
 # Prepare data
 data <- DA_asvs %>% 
@@ -358,7 +362,7 @@ pos_header <- c(
   "DATA"
 )
 
-writeLines(c(pos_header, pos_lines), "../../phylogentic_tree/exported-tree/itol/itol_simplebar_positive_v7.txt")
+writeLines(c(pos_header, pos_lines), file.path(itol_dir,"itol_simplebar_positive_v7.txt"))
 
 # Negative bars (left, red/purple shades)
 neg <- data %>% 
@@ -387,7 +391,7 @@ neg_header <- c(
   "DATA"
 )
 
-writeLines(c(neg_header, neg_lines), "../../phylogentic_tree/exported-tree/itol/itol_simplebar_negative_v7.txt")
+writeLines(c(neg_header, neg_lines), file.path(itol_dir,"itol_simplebar_negative_v7.txt"))
 
 message("Files created: itol_simplebar_positive_v8.txt & itol_simplebar_negative_v8.txt")
 
