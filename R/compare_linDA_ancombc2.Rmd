@@ -1,0 +1,85 @@
+---
+title: "LinDA vs ANCOM-BC2 comparison"
+date: "2026-07-14"
+output: md_document
+---
+```{r}
+library(dplyr)
+library(readr)
+library(purrr)
+library(tibble)
+
+ranks <- c("ASVs", "Phylum", "Class", "Order", "Family", "Genus")
+
+compare_rank <- function(rank) {
+  linda_path <- paste0("../export/linDA_", rank, "_Sig_LFC1.csv")
+  ancom_path <- paste0("../export/ancombc2_", rank, "_Sig_LFC1.csv")
+
+  linda <- read_csv(linda_path, show_col_types = FALSE) %>%
+    mutate(key = paste(visit, taxa, sep = "|"))
+  ancom <- read_csv(ancom_path, show_col_types = FALSE) %>%
+    mutate(key = paste(visit, taxa, sep = "|"))
+
+  overlap_keys <- intersect(linda$key, ancom$key)
+
+  linda_lfc <- setNames(linda$log2FoldChange, linda$key)
+  ancom_lfc <- setNames(ancom$log2FoldChange, ancom$key)
+
+  n_concordant <- sum(sign(linda_lfc[overlap_keys]) == sign(ancom_lfc[overlap_keys]))
+
+  tibble(
+    Rank = rank,
+    LinDA_sig = nrow(linda),
+    ANCOMBC2_sig = nrow(ancom),
+    Overlap = length(overlap_keys),
+    Concordant_direction = n_concordant,
+    ANCOMBC2_only = nrow(ancom) - length(overlap_keys),
+    LinDA_only = nrow(linda) - length(overlap_keys)
+  )
+}
+
+summary_table <- map_dfr(ranks, compare_rank)
+
+knitr::kable(summary_table)
+```
+
+```{r}
+
+## Per-taxon detail: abundance, effect size, and significance from both methods ----
+detail_rank <- function(rank) {
+  linda_path <- paste0("../export/linDA_", rank, "_Sig_LFC1.csv")
+  ancom_path <- paste0("../export/ancombc2_", rank, "_Sig_LFC1.csv")
+
+  linda <- read_csv(linda_path, show_col_types = FALSE) %>%
+    select(visit, taxa, baseMean, LinDA_LFC = log2FoldChange, LinDA_SE = lfcSE,
+           LinDA_padj = padj)
+
+  ancom <- read_csv(ancom_path, show_col_types = FALSE) %>%
+    select(visit, taxa, ANCOMBC2_LFC = log2FoldChange, ANCOMBC2_padj = padj,
+           ANCOMBC2_passed_ss = passed_ss)
+
+  full_join(linda, ancom, by = c("visit", "taxa")) %>%
+    mutate(
+      Rank = rank,
+      Detected_by = case_when(
+        !is.na(LinDA_LFC) & !is.na(ANCOMBC2_LFC) ~ "Both",
+        !is.na(LinDA_LFC) & is.na(ANCOMBC2_LFC) ~ "LinDA only",
+        is.na(LinDA_LFC) & !is.na(ANCOMBC2_LFC) ~ "ANCOM-BC2 only"
+      ),
+      Direction_agree = if_else(
+        Detected_by == "Both",
+        sign(LinDA_LFC) == sign(ANCOMBC2_LFC),
+        NA
+      )
+    ) %>%
+    relocate(Rank, .before = visit) %>%
+    arrange(desc(Detected_by == "Both"), visit, desc(abs(LinDA_LFC)))
+}
+
+detail_table <- map_dfr(ranks, detail_rank)
+
+write_csv(detail_table, '../export/linDA_vs_ancombc2_detail_all_ranks.csv')
+
+knitr::kable(detail_table, digits = 3)
+```
+
