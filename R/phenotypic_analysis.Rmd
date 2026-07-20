@@ -3,7 +3,7 @@ title: "phenotypic_data"
 date: "2026-01-27"
 output: html_document
 ---
-
+#step 0: prepration of the csv files.
 ```{r}
 rm(list = ls())
 library(readxl)
@@ -32,6 +32,7 @@ write.csv(df_long, paste0("../phenotypic_data/",sheet,".csv"), row.names = FALSE
 
 ```
 
+#step 1: functions definitions
 ```{r}
 
 library(ggtext)
@@ -139,6 +140,7 @@ subtitles <- c("On CHROMagar","On CHROMagar",
 skip_stat <- c(F,F,F,F,F,T,F,F,F)
 hxs <- c(T,T,T,T,T,F,F,F,F)
 hys <- c(F,T,T,T,F,T,T,T,T)
+
 plot_list <- list()
 for( i in 1:length(sheets)){
   sheet <- sheets[[i]]
