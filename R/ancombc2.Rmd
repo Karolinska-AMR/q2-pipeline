@@ -1,0 +1,192 @@
+---
+title: "ancombc2"
+date: "2026-07-14"
+output: html_document
+---
+```{r}
+rm(list = ls())
+library(dplyr)
+library(qiime2R)
+library(tidyverse)
+library(reshape2)
+library(ggpubr)
+library(ggtext)
+library(pals)
+library(vegan)
+library(ANCOMBC)
+library(phyloseq)
+
+metadata<-read_q2metadata("../artifacts/metadata.tsv")
+row.names(metadata)<- metadata$SampleID
+
+feature_table <-read_qza("../artifacts/table.qza")$data
+taxonomy_annot <- read_qza('../artifacts/taxonomy_classification/taxonomy.qza')$data
+
+# raw_counts <- taxonomy_annot %>% select("Feature.ID","Confidence","Taxon") %>% 
+#   merge(feature_table, by.x='Feature.ID',by.y = 'row.names',all.y = T)
+
+
+taxonomy_annot <-taxonomy_annot %>% mutate(taxa = str_remove_all(Taxon, "D_\\d__")) %>%
+  separate_wider_delim(taxa, "; ", names = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),too_few = "align_start") %>%
+   mutate_at(c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"), list(~ substr(., 4, nchar(.))))
+
+row.names(taxonomy_annot)<- taxonomy_annot$Feature.ID
+
+feature_table <- as.matrix(feature_table)
+
+sample_names_correct <- colnames(feature_table)
+metadata <- metadata[match(sample_names_correct, rownames(metadata)), ]
+metadata <- metadata %>%
+  tibble::rownames_to_column("SampleID_temp") %>%
+  filter(SampleID_temp %in% sample_names_correct) %>%
+  arrange(match(SampleID_temp, sample_names_correct)) %>%
+  tibble::column_to_rownames("SampleID_temp")
+
+if (!all(rownames(metadata) %in% metadata$SampleID)) {
+  warning("Some rownames in metadata do not match the SampleID column!")
+}
+
+metadata["subject_id"] = metadata['subject-id']
+metadata$visit <- factor(metadata$visit, levels = c("v2", "v6", "v7", "v8"))
+
+```
+
+
+```{r}
+
+aggregate_features <- function(feature_table, taxonomy_annot, rank = 'Genus') {
+  cat("Aggregating features by", rank, "level...\n")
+  
+  taxa_meta <- taxonomy_annot %>% select(c(Feature.ID, all_of(rank)))
+  
+  feature_table_agg <- as.data.frame(feature_table) %>% 
+    rownames_to_column(var = "Feature.ID") %>%
+    merge(taxa_meta, by = "Feature.ID", all.x = TRUE) %>% 
+    select(-'Feature.ID') %>%
+    mutate(across(!starts_with(rank), as.numeric)) %>%
+    group_by(across(all_of(rank))) %>% 
+    summarize(across(where(is.numeric), sum)) %>% 
+    ungroup() %>% 
+    as.data.frame()
+  
+  rank_val <- feature_table_agg[, rank]
+  row.names(feature_table_agg) <- replace(rank_val, is.na(rank_val), 'unknown')
+  feature_table_agg <- feature_table_agg[, -1]
+  feature_table_agg <- as.matrix(feature_table_agg)
+  
+  return(feature_table_agg)
+}
+
+filter_features <- function(feature_table,metadata, threshold=0.3){
+    baselines <- c("v2","v6")
+    treatments <- c("v7","v8")
+    BL_samples <- metadata%>% filter(visit %in% baselines) %>% pull(SampleID)
+    TR_samples <- metadata%>% filter(visit %in% treatments) %>% pull(SampleID)
+   
+    BL_prv <- rowMeans(feature_table[,BL_samples] >=1, na.rm = T)
+    TR_prv <- rowMeans(feature_table[,TR_samples] >=1, na.rm = T)
+    
+    prevalence_df <- data.frame(
+        feature_ids = names(BL_prv),
+        prevalence_BL = BL_prv,
+        prevalence_TR = TR_prv
+      ) %>%
+        filter(prevalence_BL >= 0.30 | prevalence_TR>= 0.30)
+    
+    return(prevalence_df$feature_ids)
+
+}
+
+## Run differential abundant taxa on aggregated data ----
+run_dab_aggregated <- function(feature_table_agg, metadata) {
+  cat("Running ANCOM-BC2 analysis on aggregated data...\n")
+  
+  # remove low abundant features (same prevalence filter used for LinDA)
+  
+  keep_fearures = filter_features(feature_table_agg,metadata,threshold = 0.3)
+  filter_features_agg <- feature_table_agg[keep_fearures,]
+  
+  ps <- phyloseq(
+    otu_table(filter_features_agg, taxa_are_rows = TRUE),
+    sample_data(metadata)
+  )
+  
+  results <- ancombc2(
+    data = ps,
+    fix_formula = "visit",             # Fixed: visit 
+    rand_formula = "(1 | subject_id)", # Random: subject_id for non-independence
+    p_adj_method = "BH",
+    prv_cut = 0,               # has been already filtered, so no more!
+    lib_cut = 1,               # no samples removal
+    s0_perc = 0.1,              # variance moderation
+    group = "visit",           # required for structural zero detection across visits
+    struc_zero = T,
+    neg_lb = T,
+    alpha = 0.05,               # Significance threshold (default 0.05)
+    n_cl = parallel::detectCores() - 1,
+    verbose = TRUE,
+    pseudo_sens = TRUE          # [en/dis]ables the pseudo-count sensitivity score (passed_ss)
+  )
+  
+  return(results)
+}
+
+get_sigcombined <- function(ancombc2_results, LFC = 1){
+  res <- ancombc2_results$res
+  
+  extract_visit <- function(res, visit){
+    lfc_col <- paste0("lfc_visit", visit)
+    se_col <- paste0("se_visit", visit)
+    q_col <- paste0("q_visit", visit)
+    diff_col <- paste0("diff_visit", visit)
+    ss_col <- paste0("passed_ss_visit", visit)
+    
+    res %>%
+      select(taxon, all_of(c(lfc_col, se_col, q_col, diff_col, ss_col))) %>%
+      rename(lfc_natural = all_of(lfc_col), se_natural = all_of(se_col),
+             padj = all_of(q_col), reject = all_of(diff_col),
+             passed_ss = all_of(ss_col)) %>%
+      # ANCOM-BC2 reports lfc/se on the natural log scale; converting to log2
+      mutate(log2FoldChange = lfc_natural / log(2),
+             lfcSE = se_natural / log(2)) %>%
+      filter(reject == TRUE, passed_ss == TRUE, abs(log2FoldChange) >= LFC) %>%
+      select(taxon, log2FoldChange, lfcSE, padj, reject, passed_ss) %>%
+      rename(taxa = taxon)
+  }
+  
+  v6_sig <- extract_visit(res, "v6")
+  v7_sig <- extract_visit(res, "v7")
+  v8_sig <- extract_visit(res, "v8")
+  
+  combined_sig <- bind_rows(
+    v6_sig %>% mutate(visit = "v6"),
+    v7_sig %>% mutate(visit = "v7"),
+    v8_sig %>% mutate(visit = "v8")
+  ) %>% relocate(visit, .before = 1)
+  
+  return(combined_sig)
+}
+
+```
+
+```{r}
+
+ancombc2_results <- run_dab_aggregated(feature_table,metadata)
+combined_sig <- get_sigcombined(ancombc2_results,1)
+combined_sig <- combined_sig %>% 
+    merge(taxonomy_annot, by.x='taxa',by.y = 'Feature.ID')
+
+write_csv(combined_sig,'../export/ancombc2_ASVs_Sig_LFC1.csv')
+
+ranks <- c("Phylum","Class","Order","Family","Genus")
+  for (rank in ranks) {
+    print(rank)
+    ft_agg <- aggregate_features(feature_table,taxonomy_annot,rank)
+    ancombc2_results<-run_dab_aggregated(ft_agg,metadata)
+    combined_sig <- get_sigcombined(ancombc2_results,1)
+    write_csv(combined_sig,paste0('../export/ancombc2_',rank,'_Sig_LFC1.csv'))
+  break;
+  }
+
+```
+
